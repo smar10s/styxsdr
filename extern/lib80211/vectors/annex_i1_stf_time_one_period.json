@@ -1,0 +1,23 @@
+{
+  "source": "IEEE 802.11-2020, Annex I.1, Table I-3",
+  "description": "One period (16 samples) of the IFFT of the short training sequences. Table shows indices 0-63 but these repeat with period 16.",
+  "note": "The table actually shows 64 samples (4 repetitions of the 16-sample period). The unique period is samples 0-15.",
+  "samples_one_period": [
+    [0.046, 0.046],
+    [-0.132, 0.002],
+    [-0.013, -0.079],
+    [0.143, -0.013],
+    [0.092, 0.000],
+    [0.143, -0.013],
+    [-0.013, -0.079],
+    [-0.132, 0.002],
+    [0.046, 0.046],
+    [0.002, -0.132],
+    [-0.079, -0.013],
+    [-0.013, 0.143],
+    [0.000, 0.092],
+    [-0.013, 0.143],
+    [-0.079, -0.013],
+    [0.002, -0.132]
+  ]
+}

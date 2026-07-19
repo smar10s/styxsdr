@@ -1,0 +1,41 @@
+# config.mk — Local build configuration (gitignored)
+#
+# Copy this file to config.mk and edit for your environment.
+# Alternatively, pass variables on the command line:
+#   make bitstream PLACE_STRATEGY=EarlyBlockPlacement
+
+# ---- Vivado ----
+# Path to vivado binary (if not on PATH after sourcing settings)
+# VIVADO = /opt/Xilinx/2025.2/Vivado/2025.2/bin/vivado
+
+# ---- Remote builds ----
+# Set REMOTE to build on a remote host via SSH.
+# Leave commented for local builds (requires Vivado installed locally).
+# REMOTE = buildhost.example.com
+# REMOTE_USER = youruser
+# REMOTE_PORT = 22
+# REMOTE_DIR = ~/styx
+
+# ---- Placement strategy ----
+# Vivado placement directive applied during implementation.
+# Default: Explore (safe, general-purpose)
+#
+# Options:
+#   Explore              — Vivado default, good starting point
+#   EarlyBlockPlacement  — places DSP/BRAM first, logic around them (DSP-heavy)
+#   AltSpreadLogic_high  — spreads logic to reduce routing congestion (>90% LUT)
+#   ExtraPostPlacementOpt — extra optimization passes after placement
+#   WLDrivenBlockPlacement — minimizes total wire length
+#
+# PLACE_STRATEGY = Explore
+
+# ---- OOC modules ----
+# Modules to synthesize out-of-context with area optimization.
+# Styx standalone has none (design is small enough). Downstream projects
+# add their compute-heavy modules here:
+# OOC_MODULES = stf_detect cfo_est viterbi_k7 decode_engine fft64_sdf
+
+# ---- Incremental implementation ----
+# Path to a reference DCP from a previous successful build.
+# Speeds up implementation by reusing prior placement/routing.
+# INCREMENTAL = build/fpga/styx_impl.dcp

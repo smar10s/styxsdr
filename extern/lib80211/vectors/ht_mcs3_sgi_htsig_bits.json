@@ -1,0 +1,10 @@
+{
+  "source": "IEEE 802.11 TGn reference waveform generator (11-06/1715r0)",
+  "description": "HT-SIG field bits (48 bits: 34 info + 8 CRC + 6 tail, short_gi=1)",
+  "mcs": 3,
+  "length": 48,
+  "data": [
+    1,1,0,0,0,0,0,0,0,0,1,0,0,1,1,0,0,0,0,0,0,0,0,0,1,1,1,0,0,0,0,1,
+    0,0,0,1,0,0,0,1,1,0,0,0,0,0,0,0
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "source": "IEEE 802.11 TGac reference waveform generator (11-14/0571r10, CSR)",
+  "description": "VHT-SIG-B after BCC encoding (rate 1/2)",
+  "mcs": 6,
+  "length": 52,
+  "data": [
+    1,1,0,1,1,1,0,0,1,0,0,0,1,1,1,1,1,0,0,1,1,1,0,0,0,0,0,0,0,0,0,0,
+    0,0,1,1,1,0,0,1,0,1,0,0,0,1,0,1,0,1,1,1
+  ]
+}

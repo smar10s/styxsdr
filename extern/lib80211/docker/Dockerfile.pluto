@@ -1,0 +1,56 @@
+FROM ubuntu:20.04
+
+# Ubuntu 20.04 ships glibc 2.31, which is forward-compatible with
+# Pluto's glibc 2.25 for dynamic linking (OTA tools need libiio.so).
+# Ubuntu 22.04's glibc 2.35 introduces GLIBC_2.34 ABI that breaks on 2.25.
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    gcc-arm-linux-gnueabihf \
+    libc6-dev-armhf-cross \
+    make \
+    curl \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install CMake 3.28 (Ubuntu 20.04 only has 3.16, we need >=3.20)
+RUN ARCH=$(uname -m) && \
+    curl -fSL "https://github.com/Kitware/CMake/releases/download/v3.28.3/cmake-3.28.3-linux-${ARCH}.tar.gz" \
+        -o /tmp/cmake.tar.gz \
+    && tar -xzf /tmp/cmake.tar.gz -C /opt \
+    && rm /tmp/cmake.tar.gz
+ENV PATH="/opt/cmake-3.28.3-linux-aarch64/bin:/opt/cmake-3.28.3-linux-x86_64/bin:${PATH}"
+
+# Cross-compile FFTW3 single-precision with NEON for ARM
+ARG FFTW_VERSION=3.3.10
+RUN curl -fSL "https://www.fftw.org/fftw-${FFTW_VERSION}.tar.gz" \
+        -o /tmp/fftw.tar.gz \
+    && tar -xzf /tmp/fftw.tar.gz -C /tmp \
+    && cd /tmp/fftw-${FFTW_VERSION} \
+    && ./configure \
+        --host=arm-linux-gnueabihf \
+        --prefix=/usr/arm-linux-gnueabihf \
+        --enable-float \
+        --enable-static \
+        --disable-shared \
+        --enable-neon \
+    && make -j$(nproc) \
+    && make install \
+    && rm -rf /tmp/fftw*
+
+# Install libiio header for cross-compilation (shared lib lives on device).
+# We fetch the header from the official release matching the device's version.
+ARG LIBIIO_VERSION=0.25
+RUN curl -fSL "https://github.com/analogdevicesinc/libiio/archive/refs/tags/v${LIBIIO_VERSION}.tar.gz" \
+        -o /tmp/libiio.tar.gz \
+    && tar -xzf /tmp/libiio.tar.gz -C /tmp \
+    && cp /tmp/libiio-${LIBIIO_VERSION}/iio.h \
+          /usr/arm-linux-gnueabihf/include/iio.h \
+    && rm -rf /tmp/libiio*
+
+# Copy PlutoSDR libiio shared lib for cross-linking.
+# These files are NOT checked in. Run scripts/hardware/build_arm.sh with a Pluto
+# connected (USB) to auto-extract them, or fetch manually:
+#   sshpass -p analog scp root@192.168.2.1:/usr/lib/libiio.so.0.25 docker/sysroot/usr/lib/
+#   cd docker/sysroot/usr/lib && ln -sf libiio.so.0.25 libiio.so.0 && ln -sf libiio.so.0 libiio.so
+COPY sysroot/usr/lib/libiio.so* /usr/arm-linux-gnueabihf/lib/
+
+WORKDIR /src

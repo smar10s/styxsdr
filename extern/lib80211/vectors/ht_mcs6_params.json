@@ -1,0 +1,15 @@
+{
+  "source": "IEEE 802.11 TGn reference waveform generator (11-06/1715r0)",
+  "mcs": 6,
+  "length_bytes": 100,
+  "bandwidth_mhz": 20,
+  "format": "HT_MM",
+  "scrambler_seed_hex": "5d",
+  "n_cbps": 312,
+  "n_dbps": 234,
+  "n_sym": 4,
+  "n_col": 13,
+  "n_bpsc": 6,
+  "code_rate_num": 1,
+  "code_rate_ind": 2
+}

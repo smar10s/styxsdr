@@ -1,0 +1,40 @@
+// packaging/styx-pluto.dtso — Device tree overlay for Styx on PlutoSDR
+//
+// Applied at packaging time via fdtoverlay to stock PlutoSDR DTBs.
+// This operates directly on the compiled DTBs — no decompile/recompile
+// round-trip, no fragile sed pipelines.
+//
+// Changes:
+//   1. Disable ADI HDL DMA engines (replaced by styx iq_dma_rx/tx)
+//   2. Reserve 144 MB DDR for IQ DMA buffers (128 MB RX + 4 MB TX + 12 MB headroom)
+//
+// The reserved region starts at 0x10000000 (256 MB mark) and spans
+// 0x09000000 (144 MB). The 'no-map' property prevents Linux from
+// allocating this memory for general use.
+
+/dts-v1/;
+/plugin/;
+
+&{/fpga-axi@0} {
+	// ADI HDL DMA engines — disabled because styx provides its own
+	// DMA controllers (iq_dma_rx at 0x7C4B0000, iq_dma_tx at 0x7C4D0000)
+	dma@7c400000 {
+		status = "disabled";
+	};
+	dma@7c420000 {
+		status = "disabled";
+	};
+};
+
+&{/} {
+	reserved-memory {
+		#address-cells = <0x01>;
+		#size-cells = <0x01>;
+		ranges;
+
+		styx@10000000 {
+			reg = <0x10000000 0x09000000>;
+			no-map;
+		};
+	};
+};

@@ -1,0 +1,21 @@
+# .rsync-exclude — files excluded from remote sync
+# Used by: Makefile, fpga/Makefile (rsync --exclude-from)
+
+build/
+.git/
+.venv/
+__pycache__/
+.DS_Store
+
+# ADI HDL (rebuilt on remote via make setup)
+fpga/extern/adi-hdl/.git/
+fpga/extern/adi-hdl/library/
+
+# Local config (remote has its own)
+config.mk
+
+# plutosdr-fw build artifacts (rebuilt on remote)
+extern/plutosdr-fw/buildroot/output/
+extern/plutosdr-fw/buildroot/dl/
+extern/plutosdr-fw/linux/
+extern/plutosdr-fw/u-boot-xlnx/

@@ -1,0 +1,5 @@
+{
+  "source": "IEEE 802.11-2020, Annex I.1, Table I-9",
+  "description": "SIGNAL field bits after interleaving (48 bits). Interleaver per 17.3.5.7 with N_CBPS=48, N_BPSC=1.",
+  "bits": [1, 0, 0, 1, 0, 1, 0, 0, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0]
+}

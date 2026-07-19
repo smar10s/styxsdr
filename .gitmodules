@@ -1,0 +1,11 @@
+[submodule "fpga/extern/adi-hdl"]
+	path = fpga/extern/adi-hdl
+	url = https://github.com/analogdevicesinc/hdl.git
+
+[submodule "extern/plutosdr-fw"]
+	path = extern/plutosdr-fw
+	url = https://github.com/analogdevicesinc/plutosdr-fw.git
+
+[submodule "extern/lib80211"]
+	path = extern/lib80211
+	url = https://github.com/smar10s/lib80211.git

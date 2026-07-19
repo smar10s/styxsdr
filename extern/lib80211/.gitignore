@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+venv/
+
+# C build artifacts
+*.o
+*.d
+*.a
+*.so
+*.dylib
+*.framework/
+*.mex
+build-cmake/
+build-arm/
+
+# Test outputs
+*.npy
+*.npz
+*.iq
+*.bin
+test/*.log
+
+# JSON (except golden test vectors)
+*.json
+!vectors/*.json
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# libiio build
+libiio/
+docs/802.11-2020.pdf
+
+# OTA test artifacts
+tools/hardware/captures/
+*_results.json
+
+# Environment
+.envrc
+
+# Worktrees
+.worktrees/
+core

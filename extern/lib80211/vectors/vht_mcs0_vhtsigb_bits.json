@@ -1,0 +1,9 @@
+{
+  "source": "IEEE 802.11 TGac reference waveform generator (11-14/0571r10, CSR)",
+  "description": "VHT-SIG-B field bits (including CRC and tail)",
+  "mcs": 0,
+  "length": 26,
+  "data": [
+    1,0,0,1,1,0,0,0,0,0,0,0,0,0,0,0,0,1,1,1,0,0,0,0,0,0
+  ]
+}

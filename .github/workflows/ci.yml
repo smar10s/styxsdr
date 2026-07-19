@@ -1,0 +1,48 @@
+# SPDX-License-Identifier: MIT
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  rtl-lint:
+    name: "RTL lint (Verilator)"
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Verilator
+        run: sudo apt-get update && sudo apt-get install -y verilator
+      - name: Lint RTL
+        run: make -C fpga/test lint-strict
+
+  rtl-sim:
+    name: "RTL sim (cocotb + Verilator)"
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y verilator
+          pip install cocotb find_libpython
+      - name: Run all tests
+        run: make -C fpga/test all_tests
+
+  firmware-tests:
+    name: "Firmware host tests"
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure and build
+        run: |
+          cmake -B build/host -DSTYX_HOST_BUILD=ON firmware
+          cmake --build build/host
+      - name: Run tests
+        run: ctest --test-dir build/host --output-on-failure

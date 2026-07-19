@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "py80211"
+version = "0.2.0"
+description = "802.11a/g/n/ac OFDM PHY reference implementation (20 MHz, 1 SS, BCC + LDPC)"
+requires-python = ">=3.12"
+dependencies = ["numpy>=2.0", "scipy>=1.10"]
+
+[project.optional-dependencies]
+sdr = ["pyadi-iio>=0.0.20", "pylibiio>=0.25"]
+dev = ["pytest>=8.0"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["py80211*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,10 @@
+{
+  "source": "IEEE 802.11 TGac reference waveform generator (11-14/0571r10, CSR)",
+  "description": "VHT-SIG-A field bits (24 bits per symbol, 2 symbols = 48 bits total, short_gi=1)",
+  "mcs": 5,
+  "length": 48,
+  "data": [
+    0,0,1,0,0,0,0,0,0,0,0,0,0,1,0,1,1,1,0,1,0,1,0,1,1,0,0,0,1,0,1,0,
+    0,1,1,0,0,1,1,0,1,0,0,0,0,0,0,0
+  ]
+}

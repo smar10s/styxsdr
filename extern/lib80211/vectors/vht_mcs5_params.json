@@ -1,0 +1,12 @@
+{
+  "source": "IEEE 802.11 TGac reference waveform generator (11-14/0571r10, CSR)",
+  "mcs": 5,
+  "length_bytes": 100,
+  "bandwidth_mhz": 20,
+  "format": "VHT",
+  "n_ss": 1,
+  "scrambler_seed_hex": "5d",
+  "n_sym": 4,
+  "n_sd": 52,
+  "n_sp": 4
+}
