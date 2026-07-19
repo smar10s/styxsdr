@@ -14,8 +14,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Install Verilator
-        run: sudo apt-get update && sudo apt-get install -y verilator
+      - uses: veryl-lang/setup-verilator@v1
       - name: Lint RTL
         run: make -C fpga/test lint-strict
 
@@ -27,11 +26,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - uses: veryl-lang/setup-verilator@v1
       - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y verilator
-          pip install cocotb find_libpython
+        run: pip install cocotb find_libpython
       - name: Run all tests
         run: make -C fpga/test all_tests
 

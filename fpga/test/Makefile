@@ -191,4 +191,6 @@ endif
 
 # ---- cocotb include ----
 
+ifneq ($(shell which cocotb-config 2>/dev/null),)
 include $(shell cocotb-config --makefiles)/Makefile.sim
+endif
