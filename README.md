@@ -20,6 +20,48 @@ the muxed IQ outputs.
 - **Build fingerprint** — content-addressed SHA-256 of RTL+TCL, readable at runtime
 - **Runtime sample rate** — AD9361 FIR decimation (20/10/5 MSPS), no bitstream rebuild
 
+## Releases
+
+Pre-built firmware images are available on
+[GitHub Releases](https://github.com/smar10s/styxsdr/releases).
+
+### Flashing (USB mass storage, primary)
+
+1. Download `pluto.frm` from the latest release
+2. Connect PlutoSDR to your host via USB
+3. The Pluto appears as a USB mass storage drive after ~30 seconds
+4. Copy `pluto.frm` to the drive root and wait for the write to finish
+5. Eject/unmount the drive — Pluto reboots and flashes automatically
+
+The Pluto LED blinks during flashing.  Wait until the LED stops and the
+board reappears (as mass storage or network device).  It is safe to
+power-cycle afterward.
+
+**Rev.B Pluto users** — the AD9361 defaults to AD9363A tuning range on
+Rev.B boards.  After the first flash, SSH in and run
+`bin/fix_ad9361_guardrail.sh` to unlock the full AD9361 range.
+
+### Flashing (SSH, advanced)
+
+Alternative method with checksum verification and proper erase.  Requires
+Pluto reachable at `192.168.2.1` and `sshpass` installed.
+
+```bash
+# macOS: brew install hudochenkov/sshpass/sshpass
+# Linux: apt install sshpass
+
+PLUTO_PASS=analog bin/flash.sh ~/Downloads/pluto.frm
+```
+
+### Post-flash Validation
+
+```bash
+PLUTO_PASS=analog bin/validate.sh
+```
+
+This checks AD9361 initialization and verifies the build fingerprint
+matches the release artifact.
+
 ## Quick Start
 
 ```bash
@@ -33,7 +75,7 @@ make remote-setup       # remote Linux host with Vivado
 make bitstream          # FPGA synthesis + implementation
 make firmware           # ARM cross-compile (Docker)
 make package            # creates pluto.frm (bitstream + kernel + rootfs)
-make flash              # writes to PlutoSDR via USB mass storage
+make flash              # writes to PlutoSDR via SSH (see bin/flash.sh)
 make validate           # checks AD9361 init + fingerprint register
 ```
 
