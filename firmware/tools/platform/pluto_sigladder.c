@@ -121,7 +121,7 @@ static void configure_radio(void) {
  *   iterations of a typical frame), then read BACKWARD from the
  *   current RX wr_ptr.  This guarantees we capture clean mid-stream
  *   data far from any startup transient or cyclic boundary.
- *   Matches airmon-sdr's proven approach.
+ *   Matches styx-sdr's proven approach.
  *
  * Returns number of captured samples, or -1 on error.
  * Caller must free *out_real and *out_imag.

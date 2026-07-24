@@ -17,9 +17,9 @@
 | Region      | Size   | Purpose                 |
 |-------------|--------|-------------------------|
 | 0x10000000  | 128 MB | RX ring buffer          |
-| 0x18000000  | 4 MB   | TX / HIL playback       |
+| 0x18000000  | 32 MB  | TX / HIL playback / stream |
 
-144 MB total reserved by device tree overlay at 0x10000000.
+160 MB total reserved by device tree overlay at 0x10000000.
 
 ### IQ Sample Packing
 
@@ -55,20 +55,40 @@ boundaries. AXI3 HP2 read master, l_clk domain.
 
 | Offset | Name     | Access | Description                                              |
 |--------|----------|--------|----------------------------------------------------------|
-| 0x00   | CONTROL  | R/W    | `[0]` enable, `[1]` trigger (write-1-to-set), `[2]` cyclic |
+| 0x00   | CONTROL  | R/W    | `[0]` enable, `[1]` trigger (write-1-to-set), `[2]` cyclic, `[3]` stream |
 | 0x04   | STATUS   | RO     | `[0]` active, `[1]` tx_done                               |
-| 0x08   | DDR_BASE | R/W    | Physical DDR base of TX waveform (typically 0x18000000)   |
-| 0x0C   | TX_COUNT | R/W    | Total IQ samples to transmit                              |
-| 0x10   | TX_PTR   | RO     | Current read pointer — sample index                       |
+| 0x08   | DDR_BASE | R/W    | Physical DDR base of TX buffer (typically 0x18000000)     |
+| 0x0C   | TX_COUNT | R/W    | Total samples in buffer (one-shot/cyclic); buffer size in samples (stream) |
+| 0x10   | TX_PTR   | RO     | Current read pointer — unsynchronized, display-only       |
+| 0x14   | WR_PTR   | R/W    | ARM write cursor — fill FSM reads up to here (stream mode) |
+| 0x18   | RD_PTR   | RO     | FPGA read position — Gray-code synchronized (stream mode) |
 
-**One-shot mode** (`cyclic=0`): set DDR_BASE and TX_COUNT, write
+**One-shot mode** (`cyclic=0`, `stream=0`): set DDR_BASE and TX_COUNT, write
 `CONTROL` with enable=1 and trigger=1.  `tx_done` asserts when
 `TX_PTR` reaches `TX_COUNT`.  Re-trigger by writing CONTROL again.
 
-**Cyclic mode** (`cyclic=1`): loops playback continuously after
+**Cyclic mode** (`cyclic=1`, `stream=0`): loops playback continuously after
 trigger.  `tx_done` never asserts.  To stop, write CONTROL with
 enable=0 and trigger=1 — the FSM drains the current iteration then
 halts.
+
+**Streaming mode** (`stream=1`, `cyclic=1`): continuous ring-buffer
+playback.  Set DDR_BASE and TX_COUNT (buffer size in samples, typically
+8,388,608 for 32 MB).  Write CONTROL with enable=1, trigger=1,
+cyclic=1, stream=1 to start.  The fill FSM reads DDR data continuously
+and wraps at the buffer boundary.  The ARM feeds new samples by writing
+them to DDR and updating WR_PTR.  The ARM reads RD_PTR to know which
+regions are safe to overwrite.
+
+The WR_PTR → RD_PTR contract:
+- The FPGA fill FSM stalls when `fill_ptr >= WR_PTR` (no data available)
+- The ARM must not write past `RD_PTR` (region already consumed by FPGA)
+- The ARM must issue a memory barrier (`__sync_synchronize()`) before updating WR_PTR
+
+The RD_PTR is Gray-code synchronized from l_clk to s_axi_aclk — it
+lags the true drain position by 2-3 s_axi_aclk cycles (~20-30 ns at
+100 MHz).  This is conservative: the ARM sees slightly less free space
+than actually exists.
 
 **Two-phase TX**: write DDR_BASE + TX_COUNT with enable=0, then fire
 a second write with enable=1 + trigger=1.  The trigger register write

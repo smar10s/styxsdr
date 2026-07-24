@@ -72,14 +72,17 @@
 //   Torn reads are acceptable for this register.
 //
 // ARM control via AXI4-Lite (s_axi_aclk domain):
-//   0x00  CONTROL   R/W  [0]=enable, [1]=trigger (W1S), [2]=cyclic
+//   0x00  CONTROL   R/W  [0]=enable, [1]=trigger (W1S), [2]=cyclic, [3]=stream
 //   0x04  STATUS    R    [0]=active, [1]=tx_done
-//   0x08  DDR_BASE  R/W  Physical DDR base of TX waveform
-//   0x0C  TX_COUNT  R/W  Total samples to transmit
-//   0x10  TX_PTR    R    Current read pointer (sample index)
+//   0x08  DDR_BASE  R/W  Physical DDR base of TX buffer
+//   0x0C  TX_COUNT  R/W  Total samples in buffer (one-shot/cyclic); buffer size (stream)
+//   0x10  TX_PTR    R    Current read pointer (sample index, unsynchronized)
+//   0x14  WR_PTR    R/W  ARM write cursor (stream mode: fill FSM reads up to here)
+//   0x18  RD_PTR    R    FPGA read position (stream mode: ARM may overwrite past here)
 
 module iq_dma_tx #(
-    parameter BURST_LEN = 16    // AXI3 max burst (16 beats of 64 bits)
+    parameter BURST_LEN = 16,               // AXI3 max burst (16 beats of 64 bits)
+    parameter BUF_SIZE_SAMPLES = 32'd8388608 // 32 MB / 4 bytes = 2^23
 ) (
     // l_clk domain — fill FSM + drain FSM + AXI3 master + DAC output
     (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 clk CLK" *)
@@ -187,14 +190,18 @@ module iq_dma_tx #(
     localparam REG_DDR_BASE = 32'h08;
     localparam REG_TX_COUNT = 32'h0C;
     localparam REG_TX_PTR   = 32'h10;
+    localparam REG_WR_PTR   = 32'h14;
+    localparam REG_RD_PTR   = 32'h18;
 
     // =========================================================
     // Control registers (s_axi_aclk domain — written by AXI-Lite)
     // =========================================================
     reg         reg_enable_axi;
     reg         reg_cyclic_axi;
+    reg         reg_stream_axi;
     reg [31:0]  reg_ddr_base_axi;
     reg [31:0]  reg_tx_count_axi;
+    reg [31:0]  reg_wr_ptr_axi;
     reg         trigger_toggle_axi;
 
     // =========================================================
@@ -205,8 +212,13 @@ module iq_dma_tx #(
 
     reg         lcl_enable;
     reg         lcl_cyclic;
+    reg         lcl_stream;
     reg [31:0]  lcl_ddr_base;
     reg [31:0]  lcl_tx_count;
+    reg [31:0]  lcl_wr_ptr;
+
+    // WR_PTR 2-stage CDC: s_axi_aclk -> l_clk
+    (* ASYNC_REG = "TRUE" *) reg [31:0] wr_ptr_sync1, wr_ptr_sync2;
 
     always @(posedge clk) begin
         if (rst) begin
@@ -215,8 +227,12 @@ module iq_dma_tx #(
             trig_sync3   <= 0;
             lcl_enable   <= 0;
             lcl_cyclic   <= 0;
+            lcl_stream   <= 0;
             lcl_ddr_base <= 0;
             lcl_tx_count <= 0;
+            lcl_wr_ptr   <= 0;
+            wr_ptr_sync1 <= 0;
+            wr_ptr_sync2 <= 0;
         end else begin
             trig_sync1 <= trigger_toggle_axi;
             trig_sync2 <= trig_sync1;
@@ -225,11 +241,19 @@ module iq_dma_tx #(
             if (trigger_edge) begin
                 lcl_enable   <= reg_enable_axi;
                 lcl_cyclic   <= reg_cyclic_axi;
+                lcl_stream   <= reg_stream_axi;
                 lcl_ddr_base <= reg_ddr_base_axi;
                 lcl_tx_count <= reg_tx_count_axi;
                 // Note: diagnostic counters are reset by trigger_edge
                 // in their respective FSM always blocks (fill/drain)
             end
+
+            // WR_PTR: continuously synchronized (not latched on trigger).
+            // Updated by ARM in chunks during stream mode.  A stale value
+            // is conservative (fill FSM stalls, never over-reads).
+            wr_ptr_sync1 <= reg_wr_ptr_axi;
+            wr_ptr_sync2 <= wr_ptr_sync1;
+            lcl_wr_ptr   <= wr_ptr_sync2;
         end
     end
 
@@ -241,17 +265,39 @@ module iq_dma_tx #(
     reg         tx_active_sync1, tx_active_sync2;
     reg         tx_done_sync1,   tx_done_sync2;
 
+    // RD_PTR Gray-code CDC: l_clk -> s_axi_aclk
+    (* ASYNC_REG = "TRUE" *) reg [31:0] rd_ptr_gray_sync1, rd_ptr_gray_sync2;
+    reg [31:0] rd_ptr_readable;
+
+    // Gray-to-binary combinatorial decode
+    function [31:0] gray_to_bin;
+        input [31:0] g;
+        integer j;
+        begin
+            gray_to_bin[31] = g[31];
+            for (j = 30; j >= 0; j = j - 1)
+                gray_to_bin[j] = gray_to_bin[j+1] ^ g[j];
+        end
+    endfunction
+
     always @(posedge s_axi_aclk) begin
         if (!s_axi_aresetn) begin
             tx_active_sync1 <= 0;
             tx_active_sync2 <= 0;
             tx_done_sync1   <= 0;
             tx_done_sync2   <= 0;
+            rd_ptr_gray_sync1 <= 0;
+            rd_ptr_gray_sync2 <= 0;
+            rd_ptr_readable <= 0;
         end else begin
             tx_active_sync1 <= tx_active;
             tx_active_sync2 <= tx_active_sync1;
             tx_done_sync1   <= tx_done;
             tx_done_sync2   <= tx_done_sync1;
+
+            rd_ptr_gray_sync1 <= rd_ptr_gray_reg;
+            rd_ptr_gray_sync2 <= rd_ptr_gray_sync1;
+            rd_ptr_readable   <= gray_to_bin(rd_ptr_gray_sync2);
         end
     end
 
@@ -360,8 +406,17 @@ module iq_dma_tx #(
     // Use tx_done (properly synced) for completion gating.
     reg [31:0] tx_ptr;
 
+    // RD_PTR Gray-code CDC: l_clk -> s_axi_aclk
+    wire [31:0] rd_ptr_gray = tx_ptr ^ (tx_ptr >> 1);
+    reg  [31:0] rd_ptr_gray_reg;
+
     // Next-segment helper: (drain_seg + 1) mod 16
     wire [3:0] next_drain_seg = drain_seg + 4'd1;
+
+    // Ring-buffer wrap helper for fill_ptr (power-of-2 BUF_SIZE_SAMPLES).
+    // BUF_SIZE_SAMPLES = 2^23; bitwise AND mask eliminates 32-bit comparator
+    // and subtractor from the critical path (F_SWAP → m_axi_araddr).
+    wire [31:0] fill_ptr_next = (fill_ptr + SAMPLES_PER_BURST) & (BUF_SIZE_SAMPLES - 1);
 
     // =========================================================
     // Fill FSM
@@ -386,8 +441,11 @@ module iq_dma_tx #(
         end else begin
             mem_wr_en <= 0;
 
-            // Drain FSM clears its segment via drain_clear
-            seg_ready <= seg_ready & ~drain_clear;
+            // Default: drain FSM clears its segment via drain_clear.
+            // F_LATCH has its own explicit clear (restart) — the
+            // if/else prevents a Verilog double-NBA on seg_ready.
+            if (f_state != F_LATCH)
+                seg_ready <= seg_ready & ~drain_clear;
 
             case (f_state)
                 // -------------------------------------------------
@@ -404,11 +462,24 @@ module iq_dma_tx #(
                         fill_seg       <= 0;
                         fill_ptr       <= 0;
                         fill_remaining <= lcl_tx_count;
-                        // Start first burst
-                        m_axi_araddr   <= lcl_ddr_base;
-                        m_axi_arvalid  <= 1;
-                        fill_beat      <= 0;
-                        f_state        <= F_RD_ADDR;
+                        // Clear all segment ready flags so the drain
+                        // FSM doesn't consume stale BRAM data from a
+                        // previous run on restart.
+                        seg_ready      <= {NUM_SEGS{1'b0}};
+                        wrap_ar_issued   <= 0;
+                        wrap_ar_accepted <= 0;
+                        if (lcl_stream && lcl_wr_ptr == 0) begin
+                            // Stream mode: no data written yet.
+                            // Wait for the ARM to feed data before
+                            // issuing the first DDR read.
+                            f_state <= F_WAIT;
+                        end else begin
+                            // Start first burst
+                            m_axi_araddr   <= lcl_ddr_base;
+                            m_axi_arvalid  <= 1;
+                            fill_beat      <= 0;
+                            f_state        <= F_RD_ADDR;
+                        end
                     end else begin
                         f_state <= F_IDLE;
                     end
@@ -445,6 +516,13 @@ module iq_dma_tx #(
                         // controller begins row-activate in parallel with
                         // serving the current burst.  By F_SWAP time, the
                         // wrap data is partially/fully ready.
+                        //
+                        // NOTE: This path uses the traditional fill_remaining-
+                        // based wrap boundary (<= SAMPLES_PER_BURST). The
+                        // mid-buffer path (F_SWAP via fill_ptr_next & mask)
+                        // uses a different mechanism. Two wrap mechanisms
+                        // coexist and BOTH must be updated if the wrap
+                        // boundary definition changes.
                         //
                         // Conditions: first beat of last burst, cyclic,
                         // enabled, and next segment is free.
@@ -553,17 +631,22 @@ module iq_dma_tx #(
                         end
                     end else begin
                         fill_remaining <= fill_remaining - SAMPLES_PER_BURST;
-                        fill_ptr       <= fill_ptr + SAMPLES_PER_BURST;
+                        fill_ptr       <= fill_ptr_next;
                         fill_seg       <= fill_seg + 4'd1;
                         // Normal mid-waveform: check if next segment is free
-                        // for immediate issue (same optimization as cyclic wrap)
-                        if (!seg_ready[fill_seg + 4'd1] && !drain_clear[fill_seg + 4'd1]) begin
-                            m_axi_araddr   <= lcl_ddr_base + {fill_ptr + SAMPLES_PER_BURST, 2'b00};
+                        // for immediate issue (same optimization as cyclic wrap).
+                        // Uses fill_ptr_next for DDR address so stream-mode
+                        // ring-buffer wrap is transparent.
+                        // In stream mode, also check we haven't caught up to
+                        // the ARM's write pointer before issuing the next read.
+                        if ((lcl_stream && fill_ptr_next >= lcl_wr_ptr) ||
+                            (seg_ready[fill_seg + 4'd1] || drain_clear[fill_seg + 4'd1])) begin
+                            f_state <= F_WAIT;
+                        end else begin
+                            m_axi_araddr   <= lcl_ddr_base + {fill_ptr_next, 2'b00};
                             m_axi_arvalid  <= 1;
                             fill_beat      <= 0;
                             f_state        <= F_RD_ADDR;
-                        end else begin
-                            f_state <= F_WAIT;
                         end
                     end
                 end
@@ -587,11 +670,19 @@ module iq_dma_tx #(
                             f_state <= F_DONE;
                         end
                     end else if (!seg_ready[fill_seg]) begin
-                        // Target segment is free — issue next read
-                        m_axi_araddr   <= lcl_ddr_base + {fill_ptr, 2'b00};
-                        m_axi_arvalid  <= 1;
-                        fill_beat      <= 0;
-                        f_state        <= F_RD_ADDR;
+                        // Target segment is free — but in stream mode,
+                        // also check we haven't caught up to the ARM's
+                        // write pointer (lcl_wr_ptr).  If fill_ptr has
+                        // reached wr_ptr, stay in F_WAIT — the ARM hasn't
+                        // written the next chunk yet.
+                        if (lcl_stream && fill_ptr >= lcl_wr_ptr) begin
+                            // Stall: caught up to write pointer
+                        end else begin
+                            m_axi_araddr   <= lcl_ddr_base + {fill_ptr, 2'b00};
+                            m_axi_arvalid  <= 1;
+                            fill_beat      <= 0;
+                            f_state        <= F_RD_ADDR;
+                        end
                     end
                 end
 
@@ -790,6 +881,8 @@ module iq_dma_tx #(
 
                 default: d_state <= D_IDLE;
             endcase
+
+            rd_ptr_gray_reg <= rd_ptr_gray;
         end
     end
 
@@ -815,8 +908,10 @@ module iq_dma_tx #(
             reg_enable_axi     <= 0;
             trigger_toggle_axi <= 0;
             reg_cyclic_axi     <= 0;
+            reg_stream_axi     <= 0;
             reg_ddr_base_axi   <= 0;
             reg_tx_count_axi   <= 0;
+            reg_wr_ptr_axi     <= 0;
         end else begin
             if (s_axi_awvalid && !aw_done_l) begin
                 s_axi_awready <= 1;
@@ -839,9 +934,11 @@ module iq_dma_tx #(
                         if (w_data_l[1])
                             trigger_toggle_axi <= ~trigger_toggle_axi;
                         reg_cyclic_axi <= w_data_l[2];
+                        reg_stream_axi <= w_data_l[3];
                     end
                     REG_DDR_BASE[7:0]: reg_ddr_base_axi <= w_data_l;
                     REG_TX_COUNT[7:0]: reg_tx_count_axi <= w_data_l;
+                    REG_WR_PTR[7:0]:   reg_wr_ptr_axi   <= w_data_l;
                     default: ;
                 endcase
                 s_axi_bvalid <= 1;
@@ -877,11 +974,13 @@ module iq_dma_tx #(
 
             if (ar_done_l && !s_axi_rvalid) begin
                 case (ar_addr_l[7:0])
-                    REG_CONTROL[7:0]:  s_axi_rdata <= {29'b0, reg_cyclic_axi, 1'b0, reg_enable_axi};
+                    REG_CONTROL[7:0]:  s_axi_rdata <= {28'b0, reg_stream_axi, reg_cyclic_axi, 1'b0, reg_enable_axi};
                     REG_STATUS[7:0]:   s_axi_rdata <= {30'b0, tx_done_sync2, tx_active_sync2};
                     REG_DDR_BASE[7:0]: s_axi_rdata <= reg_ddr_base_axi;
                     REG_TX_COUNT[7:0]: s_axi_rdata <= reg_tx_count_axi;
                     REG_TX_PTR[7:0]:   s_axi_rdata <= tx_ptr;  // UNSYNCHRONIZED: display only, not for sync decisions
+                    REG_WR_PTR[7:0]:   s_axi_rdata <= reg_wr_ptr_axi;
+                    REG_RD_PTR[7:0]:   s_axi_rdata <= rd_ptr_readable;  // Gray-decoded, 2-cycle stale
                     default:           s_axi_rdata <= 32'hDEADBEEF;
                 endcase
                 s_axi_rvalid <= 1;

@@ -14,6 +14,7 @@ the muxed IQ outputs.
 ## Features
 
 - **128 MB RX ring buffer** — continuous ADC capture at 20 MSPS, ~1.7 s depth
+- **32 MB TX buffer with stream mode** — one-shot, cyclic, or continuous ARM→FPGA feed via WR_PTR CDC register
 - **Two-phase TX** — load waveform (slow), trigger playback (single register write, deterministic)
 - **HIL test injection** — mux live ADC vs. DDR playback, rate-matched, for golden-vector validation
 - **Debug snap probe** — 1024-deep BRAM capture with configurable trigger position
@@ -105,27 +106,28 @@ AD9361 ADC ─→ [FIR, dec] ─→ adc_sync (CDC) ─→ iq_dma_rx ─→ DDR r
                                                      ▼
                                                 snap_axi (debug probe)
 
-DDR buffer ─→ iq_dma_tx ─→ [FIR, interp] ─→ AD9361 DAC
+DDR TX buffer (32 MB) ─→ iq_dma_tx (one-shot / cyclic / stream) ─→ [FIR, interp] ─→ AD9361 DAC
 DDR buffer ─→ hil_ctrl (test playback mode)
 ```
 
-| Module       | Lines | Purpose |
-|--------------|-------|---------|
-| **iq_dma_rx** | 595 | ADC-to-DDR via AXI3 HP0. Double-buffered BRAM, 128 MB circular buffer, 20 MSPS sustained. |
-| **iq_dma_tx** | 897 | DDR-to-DAC via AXI3 HP2. 16-segment BRAM fill pipeline, zero-bubble drain FSM, speculative wrap AR. |
-| **hil_ctrl**  | 427 | HIL test controller. IQ mux between live ADC and DDR playback, rate-matched (1 sample per 5 clocks). |
-| **snap_axi**  | 253 | Debug capture probe. 1024-deep BRAM, pre/post trigger split, AXI4-Lite read-back. |
-| **adc_sync**  | 79  | CDC from AD9361 l_clk (~20 MHz) to fabric sys_cpu_clk (100 MHz) via gray-code async FIFO. |
-| **axi_build_id** | 121 | Read-only 32-bit register. SHA-256 fingerprint of RTL + TCL sources, injected at synthesis. |
+| Module       | Purpose |
+|--------------|---------|
+| **iq_dma_rx** | ADC-to-DDR via AXI3 HP0. Double-buffered BRAM, 128 MB circular buffer, 20 MSPS sustained. |
+| **iq_dma_tx** | DDR-to-DAC via AXI3 HP2. 16-segment BRAM fill pipeline, zero-bubble drain FSM, speculative wrap AR, stream mode with WR_PTR CDC. |
+| **hil_ctrl**  | HIL test controller. IQ mux between live ADC and DDR playback, rate-matched (1 sample per 5 clocks). |
+| **snap_axi**  | Debug capture probe. 1024-deep BRAM, pre/post trigger split, AXI4-Lite read-back. |
+| **adc_sync**  | CDC from AD9361 l_clk (~20 MHz) to fabric sys_cpu_clk (100 MHz) via gray-code async FIFO. |
+| **axi_build_id** | Read-only 32-bit register. SHA-256 fingerprint of RTL + TCL sources, injected at synthesis. |
+| **tb_iq_dma_loopback** | TX→RX co-simulation testbench with decimator (5:1 clock ratio) and credit-sensitive AXI3 mocking. |
 
 ### DDR Memory Map
 
 | Region     | Size   | Purpose                |
 |------------|--------|------------------------|
 | 0x10000000 | 128 MB | RX ring buffer         |
-| 0x18000000 | 4 MB   | TX waveform / HIL data |
+| 0x18000000 | 32 MB  | TX buffer (waveform / stream / HIL data) |
 
-144 MB reserved from 0x10000000 by device tree overlay (`styx-pluto.dtso`).
+160 MB reserved from 0x10000000 by device tree overlay (`styx-pluto.dtso`).
 Stock ADI DMA engines are disabled.
 
 **IQ sample packing**: each 32-bit DDR word is `{8'b0, imag[11:0], real[11:0]}`.
@@ -155,7 +157,7 @@ functions.
 |--------------|---------|
 | `hal.h`      | Register map defines, IQ pack/unpack macros, AD9361 sysfs wrappers |
 | `dma_rx.h`   | RX ring buffer: start, stop, read write-pointer, blocking capture |
-| `dma_tx.h`   | TX waveform: one-shot, two-phase load/trigger, cyclic, stop |
+| `dma_tx.h`   | TX waveform: one-shot, two-phase load/trigger, cyclic, continuous streaming, stop |
 | `convert.h`  | DDR ↔ float conversion (auto-scale TX, sign-extended RX) |
 
 ### Two-Phase TX/RX Loopback
@@ -191,6 +193,36 @@ convert_rx_to_float(&rx[t0], capture_len, out_real, out_imag);
 The write-pointer snapshot falls between the slow load and the fast
 trigger, so the transmitted frame is guaranteed to appear shortly after
 `t0` in the ring buffer.
+
+### Continuous Streaming TX
+
+For long-duration waveforms where pre-loading would exceed the buffer,
+feed the FPGA continuously in small chunks:
+
+```c
+#include "hal.h"
+#include "dma_tx.h"
+
+float real[DMA_TX_STREAM_CHUNK];
+float imag[DMA_TX_STREAM_CHUNK];
+generate_tone(real, imag, DMA_TX_STREAM_CHUNK);  // fill once
+
+dma_tx_stream_start();          // 32 MB ring buffer, cyclic+stream mode
+
+uint64_t t0 = time_ms();
+while (time_ms() - t0 < 8000) {  // 8 seconds
+    // wait for headroom before feeding the next chunk
+    while (dma_tx_stream_available() < DMA_TX_STREAM_CHUNK)
+        usleep(200);
+
+    dma_tx_stream_feed(real, imag, DMA_TX_STREAM_CHUNK);
+}
+dma_tx_stream_stop();
+```
+
+The fill FSM wraps at the 32 MB boundary automatically.  `dma_tx_stream_feed()`
+issues a memory barrier before updating the WR_PTR register so the FPGA sees
+all committed DDR stores.
 
 ### Blocking RX Capture
 
@@ -244,10 +276,10 @@ styx/
 ├── registers.md           Full register map documentation
 ├── fpga/
 │   ├── Makefile            FPGA build targets (bitstream, sim, lint, waves)
-│   ├── rtl/                Custom Verilog modules (7 files)
+│   ├── rtl/                Custom Verilog modules (7 files, +1 loopback testbench)
 │   ├── project/            Vivado project (block design, top wrapper, constraints)
 │   ├── tcl/                Build procs and batch driver
-│   ├── test/               Cocotb + Verilator simulation (63 tests, 8 modules)
+│   ├── test/               Cocotb + Verilator simulation (76 tests, 9 modules)
 │   └── extern/adi-hdl/     ADI HDL IP library (submodule)
 ├── firmware/
 │   ├── src/                HAL + DMA drivers (hal, dma_rx, dma_tx, convert)
@@ -279,7 +311,7 @@ styx/
 | `make flash` | Write pluto.frm to PlutoSDR USB mass storage |
 | `make validate` | Post-flash check (AD9361 init, build ID register) |
 | `make deploy` | SCP firmware binaries to PlutoSDR `/usr/bin/` |
-| `make sim` | Run full RTL simulation suite |
+| `make sim` | Run full cocotb RTL simulation suite |
 | `make test` | Host-native firmware unit tests |
 | `make waves` | Generate VCD waveforms (`TARGET=test_xxx`) |
 | `make clean` | Remove all build artifacts |
@@ -291,8 +323,8 @@ Post-route, Vivado 2025.2, Zynq 7010:
 
 | Resource        | Used  | Available | %     |
 |-----------------|-------|-----------|-------|
-| Slice LUTs      | 4,316 | 17,600    | 24.5% |
-| Slice Registers | 6,134 | 35,200    | 17.4% |
+| Slice LUTs      | 4,427 | 17,600    | 25.2% |
+| Slice Registers | 6,385 | 35,200    | 18.1% |
 | Block RAM Tiles | 3     | 60        | 5.0%  |
 | DSP Blocks      | 2     | 80        | 2.5%  |
 
@@ -317,7 +349,7 @@ address range without modifying styx RTL.
 GitHub Actions runs on push/PR to `main`:
 
 1. **RTL lint** — Verilator strict warnings on all modules
-2. **RTL sim** — full cocotb test suite (63 tests across 8 modules)
+2. **RTL sim** — full cocotb test suite (76 tests across 9 modules)
 3. **Firmware tests** — host-native build + ctest
 
 ## Further Reading

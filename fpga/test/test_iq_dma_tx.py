@@ -28,6 +28,8 @@ REG_STATUS   = 0x04
 REG_DDR_BASE = 0x08
 REG_TX_COUNT = 0x0C
 REG_TX_PTR   = 0x10
+REG_WR_PTR   = 0x14
+REG_RD_PTR   = 0x18
 
 # Constants
 DDR_BASE_ADDR    = 0x10000000
@@ -81,7 +83,8 @@ async def setup(dut, rvalid_delay=0, jitter_range=0):
     return axi, slave
 
 
-async def configure_and_trigger(axi, slave, samples, tx_count=None, cyclic=False):
+async def configure_and_trigger(axi, slave, samples, tx_count=None,
+                                 cyclic=False, stream=False):
     """Load DDR, configure registers, and trigger TX.
 
     Args:
@@ -90,6 +93,7 @@ async def configure_and_trigger(axi, slave, samples, tx_count=None, cyclic=False
         samples: list of (re, im) tuples to pre-load into DDR.
         tx_count: total sample count (default: len(samples)).
         cyclic: enable cyclic mode.
+        stream: enable stream mode (implies cyclic).
     """
     if tx_count is None:
         tx_count = len(samples)
@@ -101,8 +105,17 @@ async def configure_and_trigger(axi, slave, samples, tx_count=None, cyclic=False
     await axi.write(REG_DDR_BASE, DDR_BASE_ADDR)
     await axi.write(REG_TX_COUNT, tx_count)
 
-    # Trigger: enable=1, trigger=1, cyclic=bit2
-    ctrl = 0x03 if not cyclic else 0x07
+    if stream:
+        # Stream mode: set WR_PTR to the full sample count so fill FSM
+        # knows all pre-loaded data is available
+        await axi.write(REG_WR_PTR, tx_count)
+
+    # Trigger: enable=1, trigger=1, cyclic=bit2, stream=bit3
+    ctrl = 0x03  # enable + trigger
+    if cyclic or stream:
+        ctrl |= 0x04  # cyclic
+    if stream:
+        ctrl |= 0x08  # stream
     await axi.write(REG_CONTROL, ctrl)
 
 
@@ -517,4 +530,206 @@ async def test_cyclic_contention_at_wrap(dut):
         f"{mismatches} mismatches with rvalid_delay=8 across cyclic wrap"
 
     # Stop cyclic
+    await axi.write(REG_CONTROL, 0x02)
+
+
+# =========================================================
+# Test 12: Stream basic — pre-load, trigger stream, verify
+# =========================================================
+@cocotb.test()
+async def test_stream_basic(dut):
+    """Pre-load DDR with 128 samples, stream mode, verify fill+drain works."""
+    axi, slave = await setup(dut)
+
+    tx_count = 128
+    samples = make_samples(tx_count)
+    await configure_and_trigger(axi, slave, samples, tx_count=tx_count,
+                                cyclic=True, stream=True)
+
+    captured = await capture_output(dut, max_samples=tx_count, timeout_cycles=8000)
+
+    assert len(captured) >= tx_count, \
+        f"Expected >= {tx_count} samples in stream mode, got {len(captured)}"
+
+    mismatches = 0
+    for i in range(tx_count):
+        if i >= len(captured):
+            break
+        got_re, got_im = captured[i]
+        exp_re, exp_im = expected_dac_output(*samples[i])
+        if got_re != exp_re or got_im != exp_im:
+            mismatches += 1
+            if mismatches <= 3:
+                dut._log.error(
+                    f"Stream sample {i}: expected (0x{exp_re:04X}, 0x{exp_im:04X}), "
+                    f"got (0x{got_re:04X}, 0x{got_im:04X})")
+
+    assert mismatches == 0, f"{mismatches} stream data mismatches"
+
+    # Stop stream
+    await axi.write(REG_CONTROL, 0x02)
+
+
+# =========================================================
+# Test 13: Stream WR_PTR stall and resume
+# =========================================================
+@cocotb.test()
+async def test_stream_wr_ptr_stall(dut):
+    """Set WR_PTR=64, verify fill stalls; extend → 128, verify resume."""
+    axi, slave = await setup(dut)
+
+    # Pre-load 128 samples in DDR
+    samples = make_samples(128)
+    slave.write_iq_samples(DDR_BASE_ADDR, samples)
+
+    # Configure for stream mode but put initial WR_PTR at 64
+    await axi.write(REG_DDR_BASE, DDR_BASE_ADDR)
+    await axi.write(REG_TX_COUNT, 8388608)  # buffer size for stream
+    await axi.write(REG_WR_PTR, 64)
+
+    # Trigger stream: enable+cyclic+stream+trigger
+    await axi.write(REG_CONTROL, 0x0F)  # enable | trigger | cyclic | stream
+
+    # Capture up to 64 samples — fill should stop at WR_PTR
+    captured1 = await capture_output(dut, max_samples=70, timeout_cycles=8000)
+
+    # Should get exactly 64 (or close — the drain consumes what fill loaded)
+    assert len(captured1) >= 64, \
+        f"Expected >= 64 samples before stall, got {len(captured1)}"
+
+    # Now extend WR_PTR to 128 — fill should resume
+    await axi.write(REG_WR_PTR, 128)
+
+    # Capture another 70 samples
+    captured2 = await capture_output(dut, max_samples=70, timeout_cycles=8000)
+
+    total = len(captured1) + len(captured2)
+    assert total >= 128, \
+        f"Expected >= 128 total samples after WR_PTR extension, got {total}"
+
+    # Verify first 64 samples are correct
+    mismatches = 0
+    for i in range(min(64, len(captured1))):
+        got_re, got_im = captured1[i]
+        exp_re, exp_im = expected_dac_output(*samples[i])
+        if got_re != exp_re or got_im != exp_im:
+            mismatches += 1
+    assert mismatches == 0, f"{mismatches} mismatches in first 64 stream samples"
+
+    # Stop stream
+    await axi.write(REG_CONTROL, 0x02)
+
+
+# =========================================================
+# Test 14: Stream wrap continuity
+# =========================================================
+@cocotb.test()
+async def test_stream_wrap_continuity(dut):
+    """Verify drain output is correct across the stream ring-buffer wrap."""
+    axi, slave = await setup(dut)
+
+    # Use a small waveform length to test cyclic wrap in stream mode
+    wave_len = 96  # 3 bursts
+    samples = make_samples(wave_len)
+    await configure_and_trigger(axi, slave, samples, tx_count=wave_len,
+                                cyclic=True, stream=True)
+
+    # Capture multiple iterations
+    captured = await capture_output(dut, max_samples=wave_len * 3,
+                                    timeout_cycles=20000)
+
+    assert len(captured) >= wave_len * 2, \
+        f"Expected >= {wave_len * 2} samples, got {len(captured)}"
+
+    # Verify data repeats correctly (same pattern each iteration)
+    mismatches = 0
+    for i in range(wave_len):
+        if i < len(captured) and (i + wave_len) < len(captured):
+            if captured[i] != captured[i + wave_len]:
+                mismatches += 1
+                if mismatches <= 3:
+                    dut._log.error(
+                        f"Wrap mismatch at sample {i}: "
+                        f"iter1={captured[i]}, iter2={captured[i + wave_len]}")
+
+    assert mismatches == 0, f"{mismatches} wrap continuity mismatches"
+
+    # Stop stream
+    await axi.write(REG_CONTROL, 0x02)
+
+
+# =========================================================
+# Test 15: Stream RD_PTR tracking
+# =========================================================
+@cocotb.test()
+async def test_stream_rd_ptr_tracking(dut):
+    """Verify RD_PTR register (offset 0x18) matches drain position."""
+    axi, slave = await setup(dut)
+
+    tx_count = 64
+    samples = make_samples(tx_count)
+    await configure_and_trigger(axi, slave, samples, tx_count=tx_count,
+                                cyclic=True, stream=True)
+
+    # Let it run for a while, then read RD_PTR
+    await Timer(5000, unit="ns")
+    rd1, _ = await axi.read(REG_RD_PTR)
+    assert isinstance(rd1, int), f"RD_PTR read failed"
+
+    # Let it run some more, read again
+    await Timer(5000, unit="ns")
+    rd2, _ = await axi.read(REG_RD_PTR)
+
+    # RD_PTR should be advancing (or wrapped: rd2 < rd1 is also advancing)
+    assert rd2 != rd1, f"RD_PTR not changing: {rd1} -> {rd2}"
+
+    # RD_PTR should be within a reasonable range
+    assert rd2 >= 0 and rd2 <= tx_count * 3, \
+        f"RD_PTR out of range: {rd2}"
+
+    # Stop stream
+    await axi.write(REG_CONTROL, 0x02)
+
+
+# =========================================================
+# Test 16: Stream stop — graceful drain completion
+# =========================================================
+@cocotb.test()
+async def test_stream_stop(dut):
+    """Disable during streaming, verify graceful drain-completion stop."""
+    axi, slave = await setup(dut)
+
+    tx_count = 64
+    samples = make_samples(tx_count)
+    await configure_and_trigger(axi, slave, samples, tx_count=tx_count,
+                                cyclic=True, stream=True)
+
+    # Let it run for at least one full iteration
+    captured_before = await capture_output(dut, max_samples=tx_count,
+                                           timeout_cycles=8000)
+    assert len(captured_before) == tx_count, \
+        f"Expected {tx_count} samples before stop, got {len(captured_before)}"
+
+    # Stop via enable=0 + trigger=1
+    await axi.write(REG_CONTROL, 0x02)  # enable=0, trigger=1
+
+    # Wait for tx_done
+    done = await wait_tx_done(axi, timeout_cycles=8000)
+    assert done, "tx_done not asserted after stream stop"
+
+    # Verify STATUS: done=1
+    status, _ = await axi.read(REG_STATUS)
+    assert (status >> 1) & 1, f"STATUS tx_done not set after stop (0x{status:08X})"
+
+    # Verify we can restart cleanly
+    await axi.write(REG_DDR_BASE, DDR_BASE_ADDR)
+    await axi.write(REG_TX_COUNT, tx_count)
+    await axi.write(REG_CONTROL, 0x0F)  # enable | trigger | cyclic | stream
+
+    captured2 = await capture_output(dut, max_samples=tx_count,
+                                     timeout_cycles=8000)
+    assert len(captured2) >= tx_count, \
+        f"Restart after stop: expected >= {tx_count}, got {len(captured2)}"
+
+    # Stop
     await axi.write(REG_CONTROL, 0x02)
