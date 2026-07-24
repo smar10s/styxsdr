@@ -41,7 +41,7 @@ endif
 
 .PHONY: all_tests
 all_tests: test_axi_build_id test_async_fifo test_adc_sync test_debug_snap \
-     test_snap_axi test_iq_dma_rx test_iq_dma_tx test_hil_ctrl
+     test_snap_axi test_iq_dma_rx test_iq_dma_tx test_hil_ctrl test_iq_dma_loopback
 
 # ---- Per-module targets ----
 
@@ -110,6 +110,15 @@ test_hil_ctrl:
 		VERILOG_SOURCES="$(RTL)/hil_ctrl.v" \
 		COCOTB_TEST_MODULES=test_hil_ctrl
 
+.PHONY: test_iq_dma_loopback
+test_iq_dma_loopback:
+	@echo "--- Running test_iq_dma_loopback ---"
+	$(MAKE) sim SIM_BUILD=sim_build_iq_dma_loopback \
+		TOPLEVEL=tb_iq_dma_loopback \
+		VERILOG_SOURCES="$(CURDIR)/tb_iq_dma_loopback.v $(RTL)/iq_dma_tx.v $(RTL)/iq_dma_rx.v" \
+		COCOTB_TEST_MODULES=test_iq_dma_loopback \
+		EXTRA_ARGS="$(EXTRA_ARGS) -GVALID_RATIO=5"
+
 # ---- Lint ----
 
 LINT_SRCS = $(wildcard $(RTL)/*.v)
@@ -146,7 +155,9 @@ ifndef TARGET
 	@exit 1
 endif
 	@# Trace requires different Verilator build flags — remove stale sim_build
-	@rm -rf sim_build_$(patsubst test_%,%,$(TARGET)) sim_build_$(TARGET)
+	@SIM_DIR="sim_build_$$(echo $(TARGET) | sed 's/^test_//')"; \
+	if [ -d "$$SIM_DIR" ]; then rm -rf "$$SIM_DIR"; fi; \
+	rm -rf "sim_build_$(TARGET)"
 	@echo "=== Generating VCD for $(TARGET) ==="
 	@$(MAKE) $(TARGET) WAVES=1
 	@mkdir -p $(WAVES_DIR)

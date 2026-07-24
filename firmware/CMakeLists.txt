@@ -44,6 +44,10 @@ if(NOT STYX_HOST_BUILD)
 
         add_executable(pluto_burst_loopback tools/platform/pluto_burst_loopback.c)
         target_link_libraries(pluto_burst_loopback PRIVATE styx_hal lib80211 m)
+
+        # Streaming DMA tools
+        add_executable(pluto_stream_test tools/platform/pluto_stream_test.c)
+        target_link_libraries(pluto_stream_test PRIVATE styx_hal m)
     endif()
 endif()
 

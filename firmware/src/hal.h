@@ -34,7 +34,9 @@
 #define REG_IQ_DMA_TX_STATUS   (REG_IQ_DMA_TX_BASE + 0x04)
 #define REG_IQ_DMA_TX_DDR_BASE (REG_IQ_DMA_TX_BASE + 0x08)
 #define REG_IQ_DMA_TX_COUNT    (REG_IQ_DMA_TX_BASE + 0x0C)
-#define REG_IQ_DMA_TX_PTR      (REG_IQ_DMA_TX_BASE + 0x10)
+#define REG_IQ_DMA_TX_PTR      (REG_IQ_DMA_TX_BASE + 0x10)  /* display-only, unsynchronized */
+#define REG_IQ_DMA_TX_WR_PTR   (REG_IQ_DMA_TX_BASE + 0x14)
+#define REG_IQ_DMA_TX_RD_PTR   (REG_IQ_DMA_TX_BASE + 0x18)
 
 /* Debug snap registers */
 #define REG_SNAP_BASE          0x7C4E0000
@@ -63,6 +65,7 @@
 #define TX_CTRL_ENABLE         (1 << 0)
 #define TX_CTRL_TRIGGER        (1 << 1)
 #define TX_CTRL_CYCLIC         (1 << 2)
+#define TX_CTRL_STREAM         (1 << 3)
 
 /* --------------------------------------------------------------------------
  * DDR memory map (within 144 MB reserved region)
@@ -71,7 +74,7 @@
 #define DDR_RX_BASE            0x10000000
 #define DDR_RX_SIZE            0x08000000  /* 128 MB */
 #define DDR_TX_BASE            0x18000000
-#define DDR_TX_SIZE            0x00400000  /* 4 MB */
+#define DDR_TX_SIZE            0x02000000  /* 32 MB */
 
 /* --------------------------------------------------------------------------
  * IQ sample format: {8'b0, imag[11:0], real[11:0]} in 32-bit words
@@ -81,18 +84,14 @@
 #define IQ_PACK(real12, imag12) \
     ((uint32_t)(((uint32_t)((imag12) & 0xFFF) << 12) | ((uint32_t)((real12) & 0xFFF))))
 
-/* Extract real part with 12-bit sign extension */
+/* Extract real part with 12-bit sign extension (shift-based, std-conformant) */
 static inline int16_t IQ_REAL(uint32_t word) {
-    int16_t v = (int16_t)(word & 0xFFF);
-    if (v & 0x800) v |= (int16_t)0xF000;
-    return v;
+    return (int16_t)((word & 0xFFF) << 4) >> 4;
 }
 
 /* Extract imag part with 12-bit sign extension */
 static inline int16_t IQ_IMAG(uint32_t word) {
-    int16_t v = (int16_t)((word >> 12) & 0xFFF);
-    if (v & 0x800) v |= (int16_t)0xF000;
-    return v;
+    return (int16_t)(((word >> 12) & 0xFFF) << 4) >> 4;
 }
 
 /* --------------------------------------------------------------------------

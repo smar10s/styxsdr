@@ -6,10 +6,10 @@
 //
 // Changes:
 //   1. Disable ADI HDL DMA engines (replaced by styx iq_dma_rx/tx)
-//   2. Reserve 144 MB DDR for IQ DMA buffers (128 MB RX + 4 MB TX + 12 MB headroom)
+//   2. Reserve 160 MB DDR for IQ DMA buffers (128 MB RX + 32 MB TX)
 //
 // The reserved region starts at 0x10000000 (256 MB mark) and spans
-// 0x09000000 (144 MB). The 'no-map' property prevents Linux from
+// 0x0A000000 (160 MB). The 'no-map' property prevents Linux from
 // allocating this memory for general use.
 
 /dts-v1/;
@@ -33,7 +33,7 @@
 		ranges;
 
 		styx@10000000 {
-			reg = <0x10000000 0x09000000>;
+			reg = <0x10000000 0x0A000000>;
 			no-map;
 		};
 	};
