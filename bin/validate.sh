@@ -70,8 +70,9 @@ fi
 echo -n "Project ID... "
 ACTUAL_PID=$(ssh_cmd "devmem 0x43C00004" || echo "")
 EXPECTED_PID="0x53545958"  # "STYX"
-ACTUAL_PID_UPPER=$(echo "$ACTUAL_PID" | tr '[:lower:]' '[:upper:]')
-if [ "$ACTUAL_PID_UPPER" = "$EXPECTED_PID" ]; then
+ACTUAL_LOWER=$(echo "$ACTUAL_PID" | tr '[:upper:]' '[:lower:]')
+EXPECTED_LOWER=$(echo "$EXPECTED_PID" | tr '[:upper:]' '[:lower:]')
+if [ "$ACTUAL_LOWER" = "$EXPECTED_LOWER" ]; then
     echo "OK ($ACTUAL_PID = STYX)"
 else
     echo "MISMATCH (expected=$EXPECTED_PID = STYX, actual=$ACTUAL_PID)"
