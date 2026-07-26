@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: MIT
 // axi_build_id.v — AXI4-Lite read-only build fingerprint register
 //
-// Single 32-bit register at offset 0x00, returns BUILD_ID parameter.
+// Two 32-bit read-only registers:
+//   Offset 0x00: BUILD_ID    — content-addressed source fingerprint
+//   Offset 0x04: PROJECT_ID  — ASCII project magic (e.g. "STYX" = 0x53545958)
 // Injected at synthesis time by the build script.
 //
 // AXI address: set in system_bd.tcl (default 0x43C0_0000)
 // Read:  devmem 0x43C00000 → returns BUILD_ID value
+//        devmem 0x43C00004 → returns PROJECT_ID value
 // Write: ignored (read-only)
 //
 // Port naming follows Xilinx AXI4-Lite convention so Vivado
@@ -14,7 +17,8 @@
 `timescale 1ns/1ps
 
 module axi_build_id #(
-    parameter BUILD_ID = 32'hDEAD_BEEF
+    parameter BUILD_ID   = 32'hDEAD_BEEF,
+    parameter PROJECT_ID = 32'h53545958
 ) (
     // AXI4-Lite slave interface
     input  wire        s_axi_aclk,
@@ -56,6 +60,7 @@ module axi_build_id #(
 
     // Read logic: AR handshake, then R response one cycle later
     reg ar_latched;
+    reg [3:0] ar_addr;
 
     always @(posedge s_axi_aclk) begin
         if (!s_axi_aresetn) begin
@@ -63,6 +68,7 @@ module axi_build_id #(
             s_axi_rvalid  <= 1'b0;
             s_axi_rdata   <= 32'h0;
             ar_latched    <= 1'b0;
+            ar_addr       <= 4'h0;
         end else begin
             // Default: deassert ready after one cycle
             s_axi_arready <= 1'b0;
@@ -71,11 +77,12 @@ module axi_build_id #(
                 // Accept read address
                 s_axi_arready <= 1'b1;
                 ar_latched    <= 1'b1;
+                ar_addr       <= s_axi_araddr;
             end
 
             if (ar_latched && !s_axi_rvalid) begin
                 // Present read data one cycle after AR handshake
-                s_axi_rdata  <= BUILD_ID;
+                s_axi_rdata  <= (ar_addr == 4'h4) ? PROJECT_ID : BUILD_ID;
                 s_axi_rvalid <= 1'b1;
                 ar_latched   <= 1'b0;
             end

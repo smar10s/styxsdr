@@ -138,11 +138,12 @@ MHz).
 
 ## axi_build_id (0x43C00000)
 
-Single read-only 32-bit register.
+Two read-only 32-bit registers.
 
-| Offset | Name     | Access | Description                                      |
-|--------|----------|--------|--------------------------------------------------|
-| 0x00   | BUILD_ID | RO     | Content-addressed SHA-256 fingerprint (RTL + TCL sources) |
+| Offset | Name       | Access | Description                                      |
+|--------|------------|--------|--------------------------------------------------|
+| 0x00   | BUILD_ID   | RO     | Content-addressed SHA-256 fingerprint (RTL + TCL sources) |
+| 0x04   | PROJECT_ID | RO     | ASCII project magic number (e.g. 0x53545958 = "STYX") |
 
-Read with `devmem 0x43C00000`. Writes are accepted on the AXI bus but
-silently ignored.
+Read with `devmem 0x43C00000` (BUILD_ID) and `devmem 0x43C00004` (PROJECT_ID).
+Writes are accepted on the AXI bus but silently ignored.

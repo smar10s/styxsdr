@@ -2,9 +2,10 @@
 """Cocotb tests for axi_build_id.v — read-only build fingerprint register.
 
 Tests:
-    1. Read returns BUILD_ID parameter value
-    2. Write accepted without bus hang (BRESP=OKAY)
-    3. Write does not modify the read-only value
+    1. Read returns BUILD_ID parameter value at offset 0x00
+    2. Read returns PROJECT_ID at offset 0x04
+    3. Write accepted without bus hang (BRESP=OKAY)
+    4. Write does not modify the read-only values
 """
 
 import cocotb
@@ -53,6 +54,29 @@ async def test_read_returns_build_id(dut):
 
     assert rresp == 0, f"Expected RRESP=OKAY, got {rresp}"
     assert rdata == 0xDEAD_BEEF, f"Expected BUILD_ID=0xDEADBEEF, got 0x{rdata:08X}"
+
+
+@cocotb.test()
+async def test_read_returns_project_id(dut):
+    """Read offset 4 returns the PROJECT_ID parameter (0x53545958 = "STYX" default)."""
+    axi = await setup(dut)
+
+    rdata, rresp = await axi.read(0x04)
+
+    assert rresp == 0, f"Expected RRESP=OKAY, got {rresp}"
+    assert rdata == 0x53545958, f"Expected PROJECT_ID=0x53545958, got 0x{rdata:08X}"
+
+
+@cocotb.test()
+async def test_project_id_unchanged_after_write(dut):
+    """Write to offset 4, read back — PROJECT_ID unchanged (read-only)."""
+    axi = await setup(dut)
+
+    await axi.write(0x04, 0xCAFE_BABE)
+    rdata, rresp = await axi.read(0x04)
+
+    assert rresp == 0, f"Expected RRESP=OKAY, got {rresp}"
+    assert rdata == 0x53545958, f"Write modified PROJECT_ID! Got 0x{rdata:08X}"
 
 
 @cocotb.test()

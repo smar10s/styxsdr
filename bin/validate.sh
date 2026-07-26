@@ -6,6 +6,7 @@
 #   1. Pluto is reachable via SSH
 #   2. AD9361 initialized (IIO device present)
 #   3. Build fingerprint matches expected
+#   4. Project ID is "STYX" (0x53545958)
 #
 # Usage:
 #   ./scripts/validate.sh                    # use build/fpga/fingerprint
@@ -65,7 +66,19 @@ if [ -n "$EXPECTED_FP" ]; then
     fi
 fi
 
-# 4. Kernel boot
+# 4. Project ID (read AXI project_id register at 0x43C00004)
+echo -n "Project ID... "
+ACTUAL_PID=$(ssh_cmd "devmem 0x43C00004" || echo "")
+EXPECTED_PID="0x53545958"  # "STYX"
+ACTUAL_PID_UPPER=$(echo "$ACTUAL_PID" | tr '[:lower:]' '[:upper:]')
+if [ "$ACTUAL_PID_UPPER" = "$EXPECTED_PID" ]; then
+    echo "OK ($ACTUAL_PID = STYX)"
+else
+    echo "MISMATCH (expected=$EXPECTED_PID = STYX, actual=$ACTUAL_PID)"
+    exit 1
+fi
+
+# 5. Kernel boot
 echo -n "Kernel... "
 KVER=$(ssh_cmd "uname -r")
 echo "OK ($KVER)"

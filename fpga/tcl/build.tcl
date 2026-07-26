@@ -32,42 +32,7 @@ source [file join [file dirname [info script]] styx_procs.tcl]
 # Argument parsing
 # ============================================================================
 
-proc parse_args {argv} {
-    set opts [dict create \
-        project_dir     "" \
-        rtl_dir         "" \
-        adi_hdl_dir     "" \
-        output_dir      "" \
-        place_strategy  "Explore" \
-        ooc_modules     {} \
-        incremental     "" \
-        skip_project    0 \
-    ]
-
-    for {set i 0} {$i < [llength $argv]} {incr i} {
-        set arg [lindex $argv $i]
-        switch -- $arg {
-            -project_dir    { dict set opts project_dir [lindex $argv [incr i]] }
-            -rtl_dir        { dict set opts rtl_dir [lindex $argv [incr i]] }
-            -adi_hdl_dir    { dict set opts adi_hdl_dir [lindex $argv [incr i]] }
-            -output_dir     { dict set opts output_dir [lindex $argv [incr i]] }
-            -place_strategy { dict set opts place_strategy [lindex $argv [incr i]] }
-            -ooc_modules    { dict set opts ooc_modules [lindex $argv [incr i]] }
-            -incremental    { dict set opts incremental [lindex $argv [incr i]] }
-            -skip_project   { dict set opts skip_project 1 }
-            default         { puts "WARNING: unknown argument: $arg" }
-        }
-    }
-
-    foreach key {project_dir rtl_dir adi_hdl_dir output_dir} {
-        if {[dict get $opts $key] eq ""} {
-            error "Required argument -$key not provided"
-        }
-    }
-    return $opts
-}
-
-set opts [parse_args $argv]
+set opts [styx::parse_args $argv]
 
 set project_dir    [file normalize [dict get $opts project_dir]]
 set rtl_dir        [file normalize [dict get $opts rtl_dir]]
@@ -85,24 +50,15 @@ file mkdir $output_dir
 
 if {![dict get $opts skip_project]} {
     puts "========== PHASE 1: PROJECT CREATION =========="
-
-    # Set ADI env for their scripts (ad_hdl_dir is what ADI procs expect)
-    set ad_hdl_dir $adi_hdl_dir
-
-    # Skip ADI version check (we use Vivado 2025.2, ADI HDL expects 2023.2)
-    set ::env(ADI_IGNORE_VERSION_CHECK) 1
-    set ::env(ADI_SKIP_SYNTHESIS) 1
-
-    # Source ADI env setup (sets IGNORE_VERSION_CHECK, required_vivado_version, etc.)
-    source $adi_hdl_dir/scripts/adi_env.tcl
-
-    cd $project_dir
-    source $project_dir/system_project.tcl
-
-    puts "Project created: $project_dir/pluto.xpr"
+    styx::create_project $adi_hdl_dir $project_dir
 } else {
     puts "========== PHASE 1: OPENING EXISTING PROJECT =========="
     open_project $project_dir/pluto.xpr
+    set bd_file [glob -nocomplain $project_dir/pluto.srcs/sources_1/bd/system/system.bd]
+    if {[llength $bd_file] > 0} {
+        open_bd_design [lindex $bd_file 0]
+        puts "Opened existing block design"
+    }
 }
 
 # ============================================================================
@@ -111,7 +67,7 @@ if {![dict get $opts skip_project]} {
 
 puts "========== PHASE 2: BUILD FINGERPRINT =========="
 set fingerprint [styx::fingerprint $rtl_dir $project_dir]
-styx::set_build_id $fingerprint
+styx::set_build_id $fingerprint -project_id 0x53545958
 
 # ============================================================================
 # Phase 3: OOC synthesis

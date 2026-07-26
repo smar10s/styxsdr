@@ -293,7 +293,7 @@ ad_connect txdata_o GND
 # ARM reads with: devmem 0x43C00000
 
 create_bd_cell -type module -reference axi_build_id axi_build_id_0
-# BUILD_ID parameter will be set by build script
+# BUILD_ID and PROJECT_ID parameters will be set by build script
 
 ad_connect sys_cpu_clk axi_build_id_0/s_axi_aclk
 ad_connect sys_cpu_resetn axi_build_id_0/s_axi_aresetn

@@ -143,14 +143,36 @@ proc styx::fingerprint {rtl_dirs project_dir} {
 }
 
 # ============================================================================
-# styx::set_build_id — Inject fingerprint into axi_build_id parameter
+# styx::set_build_id — Inject fingerprint + project_id into axi_build_id parameters
+#
+# Arguments:
+#   fingerprint — hex string from styx::fingerprint
+#   args        — optional -project_id MAGIC (default: 0x53545958 = "STYX")
 # ============================================================================
-proc styx::set_build_id {fingerprint} {
-    set int_val [expr $fingerprint]
+proc styx::set_build_id {args} {
+    set fingerprint ""
+    set project_id 0x53545958
+
+    for {set i 0} {$i < [llength $args]} {incr i} {
+        set arg [lindex $args $i]
+        switch -- $arg {
+            -project_id { set project_id [lindex $args [incr i]] }
+            default     { set fingerprint $arg }
+        }
+    }
+
+    if {$fingerprint eq ""} {
+        error "styx::set_build_id: fingerprint argument required"
+    }
+
+    set fp_val [expr $fingerprint]
+    set id_val [expr $project_id]
     set cell [get_bd_cells -quiet axi_build_id_0]
     if {$cell ne ""} {
-        set_property CONFIG.BUILD_ID $int_val $cell
-        puts "BUILD_ID: $fingerprint ($int_val)"
+        set_property CONFIG.BUILD_ID $fp_val $cell
+        set_property CONFIG.PROJECT_ID $id_val $cell
+        puts "BUILD_ID:   $fingerprint ($fp_val)"
+        puts "PROJECT_ID: [format 0x%08X $id_val] (0x$id_val)"
     } else {
         puts "BUILD_ID: $fingerprint (axi_build_id_0 not found — skipped)"
     }
