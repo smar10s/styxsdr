@@ -2,14 +2,16 @@
 # fpga/tcl/styx_procs.tcl — Reusable Vivado build procedures
 #
 # Provides:
-#   styx::fingerprint    — Content-addressed build ID from source files
-#   styx::set_build_id   — Inject fingerprint into axi_build_id parameter
-#   styx::ooc_synth      — Area-optimized OOC synthesis (parallel)
-#   styx::global_synth   — Top-level synthesis
-#   styx::implement      — Place & route with named strategy
-#   styx::check_timing   — WNS/WHS extraction (no string matching)
-#   styx::report_util    — Hierarchical utilization report
-#   styx::write_outputs  — Bitstream + XSA generation
+#   styx::parse_args      — Parse command-line arguments for build.tcl
+#   styx::create_project   — Project creation from ADI env + system_project.tcl
+#   styx::fingerprint      — Content-addressed build ID from source files
+#   styx::set_build_id    — Inject fingerprint into axi_build_id parameter
+#   styx::ooc_synth       — Area-optimized OOC synthesis (parallel)
+#   styx::global_synth    — Top-level synthesis
+#   styx::implement       — Place & route with named strategy
+#   styx::check_timing    — WNS/WHS extraction (no string matching)
+#   styx::report_util     — Hierarchical utilization report
+#   styx::write_outputs   — Bitstream + XSA generation
 
 namespace eval styx {
     variable version "1.0"
@@ -22,15 +24,91 @@ namespace eval styx {
 }
 
 # ============================================================================
+# styx::parse_args — Parse command-line arguments for build.tcl drives
+#
+# Returns: dict with keys: project_dir, rtl_dir, adi_hdl_dir, output_dir,
+#          place_strategy, ooc_modules, incremental, skip_project
+# ============================================================================
+proc styx::parse_args {argv} {
+    set opts [dict create \
+        project_dir     "" \
+        rtl_dir         "" \
+        adi_hdl_dir     "" \
+        output_dir      "" \
+        place_strategy  "Explore" \
+        ooc_modules     {} \
+        incremental     "" \
+        skip_project    0 \
+    ]
+
+    for {set i 0} {$i < [llength $argv]} {incr i} {
+        set arg [lindex $argv $i]
+        switch -- $arg {
+            -project_dir    { dict set opts project_dir [lindex $argv [incr i]] }
+            -rtl_dir        { dict set opts rtl_dir [lindex $argv [incr i]] }
+            -adi_hdl_dir    { dict set opts adi_hdl_dir [lindex $argv [incr i]] }
+            -output_dir     { dict set opts output_dir [lindex $argv [incr i]] }
+            -place_strategy { dict set opts place_strategy [lindex $argv [incr i]] }
+            -ooc_modules    { dict set opts ooc_modules [lindex $argv [incr i]] }
+            -incremental    { dict set opts incremental [lindex $argv [incr i]] }
+            -skip_project   { dict set opts skip_project 1 }
+            default         { puts "WARNING: unknown argument: $arg" }
+        }
+    }
+
+    foreach key {project_dir rtl_dir adi_hdl_dir output_dir} {
+        if {[dict get $opts $key] eq ""} {
+            error "Required argument -$key not provided"
+        }
+    }
+    return $opts
+}
+
+# ============================================================================
+# styx::create_project — Create Vivado project from ADI env + project TCL
+#
+# Sources ADI environment scripts and creates the Vivado project.
+# Uses uplevel so ADI global variables (IGNORE_VERSION_CHECK,
+# required_vivado_version) are accessible to ADI procs defined later.
+# ============================================================================
+proc styx::create_project {adi_hdl_dir project_dir} {
+    set ad_hdl_dir $adi_hdl_dir
+
+    # ADI scripts must run in global scope (they set variables used by
+    # procs like adi_ip_create that access them without global decl).
+    set ::IGNORE_VERSION_CHECK 1
+    set ::env(ADI_IGNORE_VERSION_CHECK) 1
+    set ::env(ADI_SKIP_SYNTHESIS) 1
+    uplevel #0 [list source $adi_hdl_dir/scripts/adi_env.tcl]
+
+    cd $project_dir
+    uplevel #0 [list source $project_dir/system_project.tcl]
+    puts "Project created: $project_dir/pluto.xpr"
+}
+
+# ============================================================================
 # styx::fingerprint — Content-addressed build ID
 #
 # Hashes all RTL + TCL + XDC sources in deterministic order (sorted paths).
+# Accepts a single RTL dir (backward-compatible) or a list of RTL dirs.
 # Returns: 8-char hex string prefixed with 0x (32-bit)
 # ============================================================================
-proc styx::fingerprint {rtl_dir project_dir} {
+proc styx::fingerprint {rtl_dirs project_dir} {
     set files [list]
-    foreach f [glob -nocomplain $rtl_dir/*.v] { lappend files $f }
-    foreach f [glob -nocomplain $rtl_dir/*.hex] { lappend files $f }
+
+    # Normalize: single string or list
+    set dirs [list]
+    if {[llength $rtl_dirs] == 1 && [string first " " $rtl_dirs] == -1} {
+        # Single dir (not a list) — backward-compatible path
+        lappend dirs [lindex $rtl_dirs 0]
+    } else {
+        set dirs $rtl_dirs
+    }
+
+    foreach rtl_dir $dirs {
+        foreach f [glob -nocomplain $rtl_dir/*.v] { lappend files $f }
+        foreach f [glob -nocomplain $rtl_dir/*.hex] { lappend files $f }
+    }
     foreach f [glob -nocomplain $project_dir/*.tcl] { lappend files $f }
     foreach f [glob -nocomplain $project_dir/*.v] { lappend files $f }
     foreach f [glob -nocomplain $project_dir/constraints/*.xdc] { lappend files $f }
@@ -39,7 +117,7 @@ proc styx::fingerprint {rtl_dir project_dir} {
     set files [lsort -dictionary $files]
 
     if {[llength $files] == 0} {
-        error "styx::fingerprint: no source files found in $rtl_dir or $project_dir"
+        error "styx::fingerprint: no source files found"
     }
 
     # Write file list to temp, hash with sha256sum
@@ -68,10 +146,14 @@ proc styx::fingerprint {rtl_dir project_dir} {
 # styx::set_build_id — Inject fingerprint into axi_build_id parameter
 # ============================================================================
 proc styx::set_build_id {fingerprint} {
-    # Convert hex string to integer for Vivado parameter
     set int_val [expr $fingerprint]
-    set_property CONFIG.BUILD_ID $int_val [get_bd_cells -quiet axi_build_id_0]
-    puts "BUILD_ID: $fingerprint ($int_val)"
+    set cell [get_bd_cells -quiet axi_build_id_0]
+    if {$cell ne ""} {
+        set_property CONFIG.BUILD_ID $int_val $cell
+        puts "BUILD_ID: $fingerprint ($int_val)"
+    } else {
+        puts "BUILD_ID: $fingerprint (axi_build_id_0 not found — skipped)"
+    }
 }
 
 # ============================================================================
@@ -81,9 +163,25 @@ proc styx::set_build_id {fingerprint} {
 # Flow_AreaOptimized_medium strategy. Launches all in parallel.
 #
 # Arguments:
-#   modules — space-separated string of module names (e.g., "iq_dma_rx hil_ctrl")
+#   modules         — space-separated module names (e.g., "iq_dma_rx hil_ctrl")
+#   -strategy NAME  — Vivado synthesis strategy (default: Flow_AreaOptimized_medium)
+#   -control_set_opt N — CONTROL_SET_OPT_THRESHOLD value (default: unset)
 # ============================================================================
-proc styx::ooc_synth {modules} {
+proc styx::ooc_synth {args} {
+    set modules {}
+    set strategy "Flow_AreaOptimized_medium"
+    set cset_opt ""
+
+    # Parse named arguments
+    for {set i 0} {$i < [llength $args]} {incr i} {
+        set arg [lindex $args $i]
+        switch -- $arg {
+            -strategy        { set strategy [lindex $args [incr i]] }
+            -control_set_opt { set cset_opt [lindex $args [incr i]] }
+            default          { lappend modules $arg }
+        }
+    }
+
     set run_list [list]
 
     # Discover matching OOC synthesis runs
@@ -99,9 +197,12 @@ proc styx::ooc_synth {modules} {
 
         foreach run $runs {
             reset_run $run
-            set_property strategy Flow_AreaOptimized_medium [get_runs $run]
+            set_property strategy $strategy [get_runs $run]
+            if {$cset_opt ne ""} {
+                set_property STEPS.SYNTH_DESIGN.ARGS.CONTROL_SET_OPT_THRESHOLD $cset_opt [get_runs $run]
+            }
             lappend run_list $run
-            puts "OOC: $mod — queued ($run)"
+            puts "OOC: $mod — queued ($run) {$strategy}"
         }
     }
 
@@ -127,13 +228,32 @@ proc styx::ooc_synth {modules} {
 
 # ============================================================================
 # styx::global_synth — Top-level synthesis
+#
+# Arguments:
+#   top      — Top module name
+#   strategy — Vivado synthesis strategy
+#   -flatten MODE — FLATTEN_HIERARCHY mode (default: rebuilt; or: full)
 # ============================================================================
-proc styx::global_synth {top strategy} {
+proc styx::global_synth {args} {
+    set top ""
+    set strategy ""
+    set flatten "rebuilt"
+
+    for {set i 0} {$i < [llength $args]} {incr i} {
+        set arg [lindex $args $i]
+        switch -- $arg {
+            -flatten { set flatten [lindex $args [incr i]] }
+            default {
+                if {$top eq ""} { set top $arg } else { set strategy $arg }
+            }
+        }
+    }
+
     set_property TOP $top [current_fileset]
     set_property strategy $strategy [get_runs synth_1]
-    set_property STEPS.SYNTH_DESIGN.ARGS.FLATTEN_HIERARCHY rebuilt [get_runs synth_1]
+    set_property STEPS.SYNTH_DESIGN.ARGS.FLATTEN_HIERARCHY $flatten [get_runs synth_1]
 
-    puts "SYNTH: $top (strategy=$strategy)"
+    puts "SYNTH: $top (strategy=$strategy flatten=$flatten)"
     reset_run synth_1
     launch_runs synth_1 -jobs [get_param general.maxThreads]
     wait_on_run synth_1
