@@ -184,6 +184,13 @@ static int tx_and_capture(const float *tx_real, const float *tx_imag,
             return -1;
         }
 
+        /* Stop both DMAs before reading DDR — eliminates bus contention
+         * between the ARM read and the RX DMA HP port writes.  Without
+         * this, the ARM can get stale/torn reads on Cortex-A9 (no HW
+         * cache coherency with PL HP ports). */
+        dma_tx_stop();
+        dma_rx_stop();
+
         /* Read forward from t0 */
         volatile uint32_t *rx_buf = hal_ddr_rx_buf();
         uint32_t read_ptr = t0;
@@ -942,6 +949,18 @@ int main(int argc, char *argv[]) {
     }
 
     configure_radio();
+
+    /* Warm-up: TX a short silence burst to flush DAC pipeline and settle
+     * the AD9361 DC offset tracking loop.  Without this, the first 1-2
+     * trials see residual energy from radio initialization. */
+    {
+        float warmup[4096] = {0};
+        float *discard_re = NULL, *discard_im = NULL;
+        int wrc = tx_and_capture(warmup, warmup, 4096, 8000, false,
+                                 &discard_re, &discard_im);
+        (void)wrc;
+        free(discard_re); free(discard_im);
+    }
 
     /* Repeat mode: run L6 N times, report pass rate */
     if (g_repeat > 0) {

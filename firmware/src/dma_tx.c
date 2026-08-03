@@ -230,6 +230,50 @@ int dma_tx_stream_feed(const float *in_real, const float *in_imag,
     return 0;
 }
 
+int dma_tx_stream_feed_fixed(const float *in_real, const float *in_imag,
+                             size_t n_samples, float peak_scale)
+{
+    if (n_samples == 0)
+        return 0;
+
+    if (n_samples > (size_t)DMA_TX_MAX_SAMPLES) {
+        fprintf(stderr, "dma_tx_stream_fixed: %zu samples exceeds buffer\n", n_samples);
+        return -1;
+    }
+
+    int avail = dma_tx_stream_available();
+    if (avail < 0 || (size_t)avail < n_samples) {
+        fprintf(stderr, "dma_tx_stream_fixed: buffer full (need %zu, have %d)\n",
+                n_samples, avail < 0 ? 0 : avail);
+        return -1;
+    }
+
+    volatile uint32_t *tx_buf = hal_ddr_tx_buf();
+    uint32_t cursor = stream_wr_cursor;
+
+    if (cursor + (uint32_t)n_samples <= DMA_TX_MAX_SAMPLES) {
+        convert_float_to_tx(in_real, in_imag, n_samples, peak_scale,
+                            (volatile uint32_t *)&tx_buf[cursor]);
+    } else {
+        size_t first = DMA_TX_MAX_SAMPLES - cursor;
+        size_t second = n_samples - first;
+        convert_float_to_tx(in_real, in_imag, first, peak_scale,
+                            (volatile uint32_t *)&tx_buf[cursor]);
+        convert_float_to_tx(&in_real[first], &in_imag[first], second, peak_scale,
+                            (volatile uint32_t *)&tx_buf[0]);
+    }
+
+    cursor += (uint32_t)n_samples;
+    if (cursor >= DMA_TX_MAX_SAMPLES)
+        cursor -= DMA_TX_MAX_SAMPLES;
+    stream_wr_cursor = cursor;
+
+    memory_barrier();
+    hal_reg_write(REG_IQ_DMA_TX_WR_PTR, cursor);
+
+    return 0;
+}
+
 uint32_t dma_tx_stream_rd_ptr(void)
 {
     return hal_reg_read(REG_IQ_DMA_TX_RD_PTR);

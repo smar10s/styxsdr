@@ -10,6 +10,7 @@
  * -------------------------------------------------------------------------- */
 
 #define REG_BUILD_ID            0x43C00000
+#define REG_BUILD_ID_PROJECT    (REG_BUILD_ID + 0x04)  /* PROJECT_ID: bitstream identity */
 
 /* axi_ad9361 DAC core registers (for DAC data path init) */
 #define REG_AD9361_DAC_BASE     0x79024000
@@ -37,6 +38,7 @@
 #define REG_IQ_DMA_TX_PTR      (REG_IQ_DMA_TX_BASE + 0x10)  /* display-only, unsynchronized */
 #define REG_IQ_DMA_TX_WR_PTR   (REG_IQ_DMA_TX_BASE + 0x14)
 #define REG_IQ_DMA_TX_RD_PTR   (REG_IQ_DMA_TX_BASE + 0x18)
+#define REG_IQ_DMA_TX_DAC_VALID_MISS (REG_IQ_DMA_TX_BASE + 0x1C)
 
 /* Debug snap registers */
 #define REG_SNAP_BASE          0x7C4E0000
@@ -55,6 +57,12 @@
 #define REG_HIL_CTRL_PLAY_PTR  (REG_HIL_CTRL_BASE + 0x10)
 /* 0x14–0x38: reserved for downstream extension registers */
 #define REG_HIL_CTRL_ADC_CNT   (REG_HIL_CTRL_BASE + 0x3C)
+
+/* Accelerator register regions (semantics depend on bitstream PROJECT_ID).
+ * Child bitstreams (deimos, lora, etc.) place their AXI-Lite slaves here.
+ * Styx maps the memory; the accelerator library interprets the registers. */
+#define REG_ACCEL_A_BASE       0x7C510000   /* 4 KB — e.g. tag FIFO, RX FIFO */
+#define REG_ACCEL_B_BASE       0x7C520000   /* 4 KB — e.g. pipeline control */
 
 /* HIL control bits */
 #define HIL_CTRL_TEST_MODE     (1 << 0)

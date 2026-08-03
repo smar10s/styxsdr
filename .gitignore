@@ -43,3 +43,9 @@ fpga/test/dump.vcd
 
 # OS
 .DS_Store
+
+# IQ captures (large binary files, reproduced by sweep)
+captures/
+
+# OpenCode session data
+.opencode/

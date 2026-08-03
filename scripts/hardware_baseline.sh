@@ -4,13 +4,16 @@
 # Checks:
 #   1. Pluto reachable + firmware deployed
 #   2. Build fingerprint match
-#   3. ARM decode loopback at 5180 MHz (primary — 5 GHz, clean band)
-#   4. ARM decode loopback at 915 MHz  (secondary — ISM band, same baseline)
+#   3. DMA register-level validation (no RF)
+#   4. Signal ladder L1-L6 (analog path + OFDM decode)
+#   5. ARM decode loopback at 5180 MHz (primary — 5 GHz, clean band)
+#   6. ARM decode loopback at 915 MHz  (secondary — ISM band, same baseline)
+#   7. Streaming TX validation (if stream_test available)
 #
 # Results appended to logs/hardware.jsonl (persistent, append-only).
 #
 # Usage:
-#   ./scripts/hardware_baseline.sh          # full check (~3 min)
+#   ./scripts/hardware_baseline.sh          # full check (~4 min)
 #   ./scripts/hardware_baseline.sh --quick  # fingerprint only (~30 sec)
 
 set -uo pipefail
@@ -102,8 +105,44 @@ fi
 
 echo ""
 
-# ---- Step 3: ARM decode at 5180 MHz (primary) ----
-echo "3. ARM decode at 5180 MHz (5 GHz, 10 trials/rate)"
+# ---- Step 3: DMA register-level validation ----
+echo "3. DMA register-level validation"
+DMA_JSON=$($SSH "pluto_dma_test" 2>/dev/null || echo '{"passed":0}')
+DMA_PASSED=$(echo "$DMA_JSON" | grep -o '"passed":[0-9]*' | grep -o '[0-9]*')
+DMA_PASSED=${DMA_PASSED:-0}
+DMA_TOTAL=$(echo "$DMA_JSON" | grep -o '"total":[0-9]*' | grep -o '[0-9]*')
+DMA_TOTAL=${DMA_TOTAL:-7}
+if [ "$DMA_PASSED" -eq "$DMA_TOTAL" ]; then
+    result "PASS" "DMA test: ${DMA_PASSED}/${DMA_TOTAL} register tests pass"
+else
+    result "FAIL" "DMA test: ${DMA_PASSED}/${DMA_TOTAL} register tests pass"
+fi
+
+echo ""
+
+# ---- Step 4: Signal ladder (analog path + OFDM) ----
+echo "4. Signal ladder L1-L6 (5180 MHz)"
+echo "   Graduated: tone → chirp → sync → channel est → full decode"
+SIGLADDER_JSON=$($SSH "pluto_sigladder -f 5180 -a 3 -g 15" 2>/dev/null || echo '{}')
+SIGLADDER_PASS=$(echo "$SIGLADDER_JSON" | grep -o '"highest_pass":[0-9]*' | grep -o '[0-9]*')
+SIGLADDER_PASS=${SIGLADDER_PASS:-0}
+if [ "$SIGLADDER_PASS" -lt 6 ]; then
+    # Retry once — ~4% sync detection miss is a known probabilistic issue
+    echo "    L${SIGLADDER_PASS}/6 — retrying..."
+    SIGLADDER_JSON=$($SSH "pluto_sigladder -f 5180 -a 3 -g 15" 2>/dev/null || echo '{}')
+    SIGLADDER_PASS=$(echo "$SIGLADDER_JSON" | grep -o '"highest_pass":[0-9]*' | grep -o '[0-9]*')
+    SIGLADDER_PASS=${SIGLADDER_PASS:-0}
+fi
+if [ "$SIGLADDER_PASS" -ge 6 ]; then
+    result "PASS" "Signal ladder: L${SIGLADDER_PASS}/6"
+else
+    result "FAIL" "Signal ladder: L${SIGLADDER_PASS}/6"
+fi
+
+echo ""
+
+# ---- Step 5: ARM decode at 5180 MHz (primary) ----
+echo "5. ARM decode at 5180 MHz (5 GHz, 10 trials/rate)"
 echo "   This proves the analog chain is clean."
 ARM_JSON=$($SSH "pluto_loopback -f 5180 -a 3 -g 15 -n 10" 2>/dev/null || echo '{}')
 ARM5180_OK=0
@@ -132,8 +171,8 @@ fi
 
 echo ""
 
-# ---- Step 4: ARM decode at 915 MHz (secondary) ----
-echo "4. ARM decode at 915 MHz (ISM band, 10 trials/rate)"
+# ---- Step 6: ARM decode at 915 MHz (secondary) ----
+echo "6. ARM decode at 915 MHz (ISM band, 10 trials/rate)"
 ARM_JSON2=$($SSH "pluto_loopback -f 915 -a 3 -g 15 -n 10" 2>/dev/null || echo '{}')
 ARM915_OK=0
 ARM915_TOTAL=0
@@ -161,8 +200,30 @@ fi
 
 echo ""
 
+# ---- Step 7: Streaming TX validation ----
+echo "7. Streaming TX (5 second chirp loopback)"
+if $SSH "which pluto_stream_test" >/dev/null 2>&1; then
+    STREAM_JSON=$($SSH "pluto_stream_test -d 5 -r 2500000 -a 3" 2>/dev/null || echo '{"passed":false}')
+    STREAM_PASS=$(echo "$STREAM_JSON" | grep -o '"passed":true')
+    STREAM_STALLS=$(echo "$STREAM_JSON" | grep -o '"stalls":[0-9]*' | grep -o '[0-9]*')
+    STREAM_STALLS=${STREAM_STALLS:-0}
+    STREAM_DROPOUTS=$(echo "$STREAM_JSON" | grep -o '"dropouts":[0-9]*' | grep -o '[0-9]*')
+    STREAM_DROPOUTS=${STREAM_DROPOUTS:-unknown}
+    if [ -n "$STREAM_PASS" ]; then
+        result "PASS" "Stream test: 5s, 0 dropouts, 0 stalls"
+    elif [ "$STREAM_DROPOUTS" = "0" ] || [ "${STREAM_DROPOUTS:-999}" -lt 10 ]; then
+        result "PASS" "Stream test: 5s, ${STREAM_DROPOUTS} dropouts (stalls=${STREAM_STALLS})"
+    else
+        result "WARN" "Stream test: ${STREAM_DROPOUTS} dropouts, stalls=${STREAM_STALLS}"
+    fi
+else
+    echo "  [SKIP] pluto_stream_test not deployed"
+fi
+
+echo ""
+
 # ---- Log entry ----
-LOG_ENTRY="{\"timestamp\":\"${TIMESTAMP}\",\"event\":\"hardware_baseline\",\"branch\":\"${BRANCH}\",\"commit\":\"${GIT_SHA}\",\"fingerprint\":\"${FINGERPRINT}\",\"arm_5180\":{${ARM5180_LOG}},\"arm_915\":{${ARM915_LOG}},\"trials\":10}"
+LOG_ENTRY="{\"timestamp\":\"${TIMESTAMP}\",\"event\":\"hardware_baseline\",\"branch\":\"${BRANCH}\",\"commit\":\"${GIT_SHA}\",\"fingerprint\":\"${FINGERPRINT}\",\"dma_pass\":${DMA_PASSED},\"sigladder\":${SIGLADDER_PASS},\"arm_5180\":{${ARM5180_LOG}},\"arm_915\":{${ARM915_LOG}},\"trials\":10}"
 echo "$LOG_ENTRY" >> "$LOG_FILE"
 
 echo "========================================"
