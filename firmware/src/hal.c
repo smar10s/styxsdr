@@ -33,6 +33,8 @@ static volatile uint32_t *map_tx_dma   = NULL;
 static volatile uint32_t *map_dac_core = NULL;
 static volatile uint32_t *map_snap     = NULL;
 static volatile uint32_t *map_hil_ctrl = NULL;
+static volatile uint32_t *map_accel_a  = NULL;
+static volatile uint32_t *map_accel_b  = NULL;
 
 /* DDR buffer mappings */
 static volatile uint32_t *map_ddr_tx   = NULL;
@@ -89,6 +91,9 @@ static long long sysfs_read_ll(const char *path)
 
 int hal_init(void)
 {
+    if (hal_initialized)
+        return 0;
+
     mem_fd = open("/dev/mem", O_RDWR | O_SYNC);
     if (mem_fd < 0) {
         fprintf(stderr, "hal: cannot open /dev/mem: %s\n", strerror(errno));
@@ -135,6 +140,24 @@ int hal_init(void)
         PROT_READ | PROT_WRITE, MAP_SHARED, mem_fd, REG_HIL_CTRL_BASE);
     if (map_hil_ctrl == MAP_FAILED) {
         fprintf(stderr, "hal: mmap hil_ctrl failed: %s\n", strerror(errno));
+        goto fail;
+    }
+
+    /* Accelerator register regions — may or may not be populated depending
+     * on bitstream.  mmap succeeds regardless (it's just address space);
+     * reads return 0xDEADBEEF or bus error if nothing is there.  The
+     * accelerator library is responsible for probing PROJECT_ID first. */
+    map_accel_a = (volatile uint32_t *)mmap(NULL, REG_REGION_SIZE,
+        PROT_READ | PROT_WRITE, MAP_SHARED, mem_fd, REG_ACCEL_A_BASE);
+    if (map_accel_a == MAP_FAILED) {
+        fprintf(stderr, "hal: mmap accel_a failed: %s\n", strerror(errno));
+        goto fail;
+    }
+
+    map_accel_b = (volatile uint32_t *)mmap(NULL, REG_REGION_SIZE,
+        PROT_READ | PROT_WRITE, MAP_SHARED, mem_fd, REG_ACCEL_B_BASE);
+    if (map_accel_b == MAP_FAILED) {
+        fprintf(stderr, "hal: mmap accel_b failed: %s\n", strerror(errno));
         goto fail;
     }
 
@@ -202,6 +225,10 @@ void hal_cleanup(void)
         munmap((void *)map_snap, REG_REGION_SIZE);
     if (map_hil_ctrl && map_hil_ctrl != MAP_FAILED)
         munmap((void *)map_hil_ctrl, REG_REGION_SIZE);
+    if (map_accel_a && map_accel_a != MAP_FAILED)
+        munmap((void *)map_accel_a, REG_REGION_SIZE);
+    if (map_accel_b && map_accel_b != MAP_FAILED)
+        munmap((void *)map_accel_b, REG_REGION_SIZE);
     if (map_ddr_tx && map_ddr_tx != MAP_FAILED)
         munmap((void *)map_ddr_tx, DDR_TX_SIZE);
     if (map_ddr_rx && map_ddr_rx != MAP_FAILED)
@@ -213,6 +240,8 @@ void hal_cleanup(void)
     map_dac_core = NULL;
     map_snap = NULL;
     map_hil_ctrl = NULL;
+    map_accel_a = NULL;
+    map_accel_b = NULL;
     map_ddr_tx = NULL;
     map_ddr_rx = NULL;
 
@@ -257,6 +286,14 @@ uint32_t hal_reg_read(uint32_t addr)
         uint32_t offset = (addr - REG_HIL_CTRL_BASE) / 4;
         return map_hil_ctrl[offset];
     }
+    if (addr >= REG_ACCEL_A_BASE && addr < REG_ACCEL_A_BASE + REG_REGION_SIZE) {
+        uint32_t offset = (addr - REG_ACCEL_A_BASE) / 4;
+        return map_accel_a[offset];
+    }
+    if (addr >= REG_ACCEL_B_BASE && addr < REG_ACCEL_B_BASE + REG_REGION_SIZE) {
+        uint32_t offset = (addr - REG_ACCEL_B_BASE) / 4;
+        return map_accel_b[offset];
+    }
     fprintf(stderr, "hal: reg_read unknown addr 0x%08" PRIX32 "\n", addr);
     return 0xDEADBEEF;
 }
@@ -296,6 +333,16 @@ void hal_reg_write(uint32_t addr, uint32_t val)
     if (addr >= REG_HIL_CTRL_BASE && addr < REG_HIL_CTRL_BASE + REG_REGION_SIZE) {
         uint32_t offset = (addr - REG_HIL_CTRL_BASE) / 4;
         map_hil_ctrl[offset] = val;
+        return;
+    }
+    if (addr >= REG_ACCEL_A_BASE && addr < REG_ACCEL_A_BASE + REG_REGION_SIZE) {
+        uint32_t offset = (addr - REG_ACCEL_A_BASE) / 4;
+        map_accel_a[offset] = val;
+        return;
+    }
+    if (addr >= REG_ACCEL_B_BASE && addr < REG_ACCEL_B_BASE + REG_REGION_SIZE) {
+        uint32_t offset = (addr - REG_ACCEL_B_BASE) / 4;
+        map_accel_b[offset] = val;
         return;
     }
     fprintf(stderr, "hal: reg_write unknown addr 0x%08" PRIX32 "\n", addr);

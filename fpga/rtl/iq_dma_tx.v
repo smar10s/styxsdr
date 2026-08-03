@@ -185,13 +185,14 @@ module iq_dma_tx #(
     // =========================================================
     // Register map
     // =========================================================
-    localparam REG_CONTROL  = 32'h00;
-    localparam REG_STATUS   = 32'h04;
-    localparam REG_DDR_BASE = 32'h08;
-    localparam REG_TX_COUNT = 32'h0C;
-    localparam REG_TX_PTR   = 32'h10;
-    localparam REG_WR_PTR   = 32'h14;
-    localparam REG_RD_PTR   = 32'h18;
+    localparam REG_CONTROL        = 32'h00;
+    localparam REG_STATUS         = 32'h04;
+    localparam REG_DDR_BASE       = 32'h08;
+    localparam REG_TX_COUNT       = 32'h0C;
+    localparam REG_TX_PTR         = 32'h10;
+    localparam REG_WR_PTR         = 32'h14;
+    localparam REG_RD_PTR         = 32'h18;
+    localparam REG_DAC_VALID_MISS = 32'h1C;
 
     // =========================================================
     // Control registers (s_axi_aclk domain — written by AXI-Lite)
@@ -269,6 +270,9 @@ module iq_dma_tx #(
     (* ASYNC_REG = "TRUE" *) reg [31:0] rd_ptr_gray_sync1, rd_ptr_gray_sync2;
     reg [31:0] rd_ptr_readable;
 
+    (* ASYNC_REG = "TRUE" *) reg [31:0] dac_miss_gray_sync1, dac_miss_gray_sync2;
+    reg [31:0] dac_miss_readable;
+
     // Gray-to-binary combinatorial decode
     function [31:0] gray_to_bin;
         input [31:0] g;
@@ -289,6 +293,9 @@ module iq_dma_tx #(
             rd_ptr_gray_sync1 <= 0;
             rd_ptr_gray_sync2 <= 0;
             rd_ptr_readable <= 0;
+            dac_miss_gray_sync1 <= 0;
+            dac_miss_gray_sync2 <= 0;
+            dac_miss_readable <= 0;
         end else begin
             tx_active_sync1 <= tx_active;
             tx_active_sync2 <= tx_active_sync1;
@@ -298,6 +305,10 @@ module iq_dma_tx #(
             rd_ptr_gray_sync1 <= rd_ptr_gray_reg;
             rd_ptr_gray_sync2 <= rd_ptr_gray_sync1;
             rd_ptr_readable   <= gray_to_bin(rd_ptr_gray_sync2);
+
+            dac_miss_gray_sync1 <= dac_miss_gray_reg;
+            dac_miss_gray_sync2 <= dac_miss_gray_sync1;
+            dac_miss_readable   <= gray_to_bin(dac_miss_gray_sync2);
         end
     end
 
@@ -400,6 +411,10 @@ module iq_dma_tx #(
     reg [3:0]  drain_beat;          // 0..15 within current segment
     reg [63:0] out_word;            // latched for odd sample
     reg [31:0] drain_count;         // total samples output
+    reg [31:0] tx_ptr;
+    // dac_valid_miss counter: increments when drain FSM outputs a sample
+    // (D_EVEN or D_ODD) but dac_valid is not asserted.  Resets on trigger.
+    reg [31:0] dac_valid_miss_cnt;
     // WARNING: tx_ptr is in clk (l_clk) domain. Read from s_axi_aclk
     // is best-effort (potential torn reads on multi-bit crossing).
     // DO NOT use tx_ptr for synchronization decisions on ARM.
@@ -409,6 +424,9 @@ module iq_dma_tx #(
     // RD_PTR Gray-code CDC: l_clk -> s_axi_aclk
     wire [31:0] rd_ptr_gray = tx_ptr ^ (tx_ptr >> 1);
     reg  [31:0] rd_ptr_gray_reg;
+
+    wire [31:0] dac_miss_gray = dac_valid_miss_cnt ^ (dac_valid_miss_cnt >> 1);
+    reg  [31:0] dac_miss_gray_reg;
 
     // Next-segment helper: (drain_seg + 1) mod 16
     wire [3:0] next_drain_seg = drain_seg + 4'd1;
@@ -730,9 +748,18 @@ module iq_dma_tx #(
             valid_out   <= 0;
             mem_rd_addr <= 0;
             drain_clear <= {NUM_SEGS{1'b0}};
+            dac_valid_miss_cnt <= 0;
         end else begin
             valid_out   <= 0;
             drain_clear <= {NUM_SEGS{1'b0}};
+
+            // Count cycles where drain FSM outputs a sample but DAC
+            // is not ready to consume it.  Resets on trigger_edge so
+            // each TX run starts from 0.
+            if (trigger_edge)
+                dac_valid_miss_cnt <= 0;
+            else if (!dac_valid && (d_state == D_EVEN || d_state == D_ODD))
+                dac_valid_miss_cnt <= dac_valid_miss_cnt + 32'd1;
 
             case (d_state)
                 // -------------------------------------------------
@@ -883,6 +910,7 @@ module iq_dma_tx #(
             endcase
 
             rd_ptr_gray_reg <= rd_ptr_gray;
+            dac_miss_gray_reg <= dac_miss_gray;
         end
     end
 
@@ -981,6 +1009,7 @@ module iq_dma_tx #(
                     REG_TX_PTR[7:0]:   s_axi_rdata <= tx_ptr;  // UNSYNCHRONIZED: display only, not for sync decisions
                     REG_WR_PTR[7:0]:   s_axi_rdata <= reg_wr_ptr_axi;
                     REG_RD_PTR[7:0]:   s_axi_rdata <= rd_ptr_readable;  // Gray-decoded, 2-cycle stale
+                    REG_DAC_VALID_MISS[7:0]: s_axi_rdata <= dac_miss_readable;  // Gray-decoded dac_valid miss counter
                     default:           s_axi_rdata <= 32'hDEADBEEF;
                 endcase
                 s_axi_rvalid <= 1;

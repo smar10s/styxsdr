@@ -106,6 +106,20 @@ int dma_tx_stream_feed(const float *in_real, const float *in_imag,
                        size_t n_samples);
 
 /**
+ * Feed a chunk of samples with a fixed peak scale instead of auto-scaling.
+ *
+ * Same as dma_tx_stream_feed() but uses convert_float_to_tx() with the
+ * caller-provided peak_scale (e.g. 2047.0f) instead of computing auto-scale
+ * per chunk.  Essential for signals where per-chunk amplitude variation
+ * would cause auto-scale to introduce amplitude modulation (e.g. LoRa
+ * chirps with varying IQ phase).
+ *
+ * @param peak_scale  Fixed scale factor (typically 2047.0f for full-scale)
+ */
+int dma_tx_stream_feed_fixed(const float *in_real, const float *in_imag,
+                             size_t n_samples, float peak_scale);
+
+/**
  * Return the FPGA's current read position (RD_PTR register).
  *
  * This is a Gray-code-synchronized, conservative value: the actual

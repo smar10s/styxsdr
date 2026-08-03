@@ -52,11 +52,16 @@ set_false_path -from [get_cells -hierarchical -filter {NAME =~ *iq_dma_tx_0/inst
                -to   [get_cells -hierarchical -filter {NAME =~ *iq_dma_tx_0/inst/s_axi_rdata*}]
 
 # ---- iq_dma_tx WR_PTR CDC (s_axi_aclk -> l_clk) ----
-# 2-stage synchronizer: reg_wr_ptr_axi -> wr_ptr_sync1/2
-set_false_path -from [get_cells -hierarchical -filter {NAME =~ *iq_dma_tx_0/inst/reg_wr_ptr_axi*}] \
-               -to   [get_cells -hierarchical -filter {NAME =~ *iq_dma_tx_0/inst/wr_ptr_sync1*}]
+# Gray-code synchronizer: wr_ptr_gray_reg -> wr_ptr_gray_sync1/2
+set_false_path -from [get_cells -hierarchical -filter {NAME =~ *iq_dma_tx_0/inst/wr_ptr_gray_reg*}] \
+               -to   [get_cells -hierarchical -filter {NAME =~ *iq_dma_tx_0/inst/wr_ptr_gray_sync1*}]
 
 # ---- iq_dma_tx RD_PTR CDC (l_clk -> s_axi_aclk) ----
 # Gray-code synchronizer: rd_ptr_gray_reg -> rd_ptr_gray_sync1/2
 set_false_path -from [get_cells -hierarchical -filter {NAME =~ *iq_dma_tx_0/inst/rd_ptr_gray_reg*}] \
                -to   [get_cells -hierarchical -filter {NAME =~ *iq_dma_tx_0/inst/rd_ptr_gray_sync1*}]
+
+# ---- iq_dma_tx DAC_VALID_MISS CDC (l_clk -> s_axi_aclk) ----
+# Gray-code synchronizer: dac_miss_gray_reg -> dac_miss_gray_sync1/2
+set_false_path -from [get_cells -hierarchical -filter {NAME =~ *iq_dma_tx_0/inst/dac_miss_gray_reg*}] \
+               -to   [get_cells -hierarchical -filter {NAME =~ *iq_dma_tx_0/inst/dac_miss_gray_sync1*}]
