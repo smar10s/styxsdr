@@ -41,4 +41,25 @@ uint32_t dma_rx_wr_ptr(void);
 int dma_rx_capture(size_t n_samples, float *out_real, float *out_imag,
                    uint32_t timeout_ms);
 
+/**
+ * Read n_samples from the DDR ring buffer at the given read position.
+ *
+ * Copies and converts IQ data from the DDR ring buffer starting at
+ * `read_ptr`.  Handles wrap-around automatically.  Does NOT wait or
+ * poll — the caller must ensure n_samples of data is available at
+ * `read_ptr` before calling (e.g. by checking dma_rx_wr_ptr()).
+ *
+ * Use with a caller-managed read pointer to implement pipelined
+ * (overlapped) capture where processing of one chunk overlaps with
+ * FPGA writes for the next.
+ *
+ * @param read_ptr    Sample index to start reading from
+ * @param n_samples   Number of samples to read
+ * @param out_real    Output buffer for real (I) component
+ * @param out_imag    Output buffer for imaginary (Q) component
+ * @return            n_samples on success, -1 if n_samples exceeds buffer
+ */
+int dma_rx_read(uint32_t read_ptr, size_t n_samples,
+                float *out_real, float *out_imag);
+
 #endif /* STYX_DMA_RX_H */

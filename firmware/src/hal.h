@@ -38,7 +38,7 @@
 #define REG_IQ_DMA_TX_PTR      (REG_IQ_DMA_TX_BASE + 0x10)  /* display-only, unsynchronized */
 #define REG_IQ_DMA_TX_WR_PTR   (REG_IQ_DMA_TX_BASE + 0x14)
 #define REG_IQ_DMA_TX_RD_PTR   (REG_IQ_DMA_TX_BASE + 0x18)
-#define REG_IQ_DMA_TX_DAC_VALID_MISS (REG_IQ_DMA_TX_BASE + 0x1C)
+#define REG_IQ_DMA_TX_DAC_MISS (REG_IQ_DMA_TX_BASE + 0x1C)  /* Gray-decoded dac_valid miss counter */
 
 /* Debug snap registers */
 #define REG_SNAP_BASE          0x7C4E0000
@@ -137,5 +137,12 @@ double hal_ad9361_get_rx_gain(void);
 int hal_ad9361_set_rx_gain_mode(const char *mode);
 int hal_ad9361_set_tx_attenuation(double atten_db);
 int hal_ad9361_run_calibration(void);
+
+/* RX FIR filter: load coefficients and enable/disable.
+ * config is the filter_fir_config text (header + coefficients).
+ * Enabling with DEC 2 in the config does NOT change the reported
+ * sampling rate — the driver adjusts the HB chain to compensate. */
+int hal_ad9361_load_rx_fir(const char *config);
+int hal_ad9361_set_rx_fir_en(int enable);
 
 #endif /* STYX_HAL_H */

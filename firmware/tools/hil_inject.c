@@ -48,6 +48,7 @@
 #define SNAP_CTRL_ARM       (1 << 0)
 #define SNAP_CTRL_SWTRIG    (1 << 1)
 #define SNAP_DEPTH          1024
+#define SNAP_POST_DEPTH     512   /* RTL POST_DEPTH — only this many valid post-trigger */
 
 /* HIL DDR region (2 MB into TX region, avoids conflict with normal TX) */
 #define HIL_DDR_BASE        0x18200000
@@ -294,8 +295,10 @@ static int verify_snap(const uint32_t snap_buf[SNAP_DEPTH],
         }
     }
 
-    /* Compare data (up to min(n_expected, SNAP_DEPTH) samples) */
-    int compare_len = n_expected < SNAP_DEPTH ? n_expected : SNAP_DEPTH;
+    /* Compare data (up to min(n_expected, SNAP_POST_DEPTH) samples).
+     * The BRAM is 1024 deep but only POST_DEPTH (512) entries contain
+     * valid post-trigger data; entries beyond that are pre-trigger/stale. */
+    int compare_len = n_expected < SNAP_POST_DEPTH ? n_expected : SNAP_POST_DEPTH;
     for (int i = 0; i < compare_len; i++) {
         if (snap_buf[i] != expected[i]) {
             if (errors < 10 && !quiet)

@@ -419,6 +419,16 @@ int main(int argc, char *argv[])
     if (fabs((double)peak_re) < 100 && fabs((double)peak_im) < 100)
         fprintf(stderr, "  WARNING: Very low signal — consider decreasing TX attenuation or increasing RX gain\n");
 
+    /* Diagnostic exit code (propagated if no output error occurs):
+     *   0 = clean capture
+     *   2 = clipping detected (>0 clipped samples)
+     *   3 = no signal (peak < 100 LSBs) */
+    int diag_exit = 0;
+    if (clip_count > 0)
+        diag_exit = 2;
+    else if (fabs((double)peak_re) < 100 && fabs((double)peak_im) < 100)
+        diag_exit = 3;
+
     /* Output */
     FILE *out = stdout;
     if (outfile) {
@@ -462,5 +472,5 @@ int main(int argc, char *argv[])
     fprintf(stderr, "Done. Replay with: hil_inject %s\n",
             outfile ? outfile : "<stdout_file>");
 
-    return 0;
+    return diag_exit;
 }

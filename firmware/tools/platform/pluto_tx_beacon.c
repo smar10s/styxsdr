@@ -168,6 +168,11 @@ int main(int argc, char *argv[]) {
     fprintf(stderr, "TX: freq=%llu MHz, atten=%.1f dB, rate=20 MSPS\n",
             (unsigned long long)(freq / 1000000ULL), tx_atten);
 
+    /* Install signal handler BEFORE starting TX to avoid a window where
+     * Ctrl-C would kill the process without stopping the transmitter. */
+    signal(SIGINT, sigint_handler);
+    signal(SIGTERM, sigint_handler);
+
     /* Start cyclic TX DMA */
     if (dma_tx_start(tx_real, tx_imag, period_samples, true) != 0) {
         fprintf(stderr, "ERROR: dma_tx_start failed\n");
@@ -179,7 +184,6 @@ int main(int argc, char *argv[]) {
     fprintf(stderr, "Transmitting beacon (SIGINT to stop)...\n");
 
     /* Wait for SIGINT */
-    signal(SIGINT, sigint_handler);
     while (g_running) {
         usleep(100000);  /* 100 ms */
     }

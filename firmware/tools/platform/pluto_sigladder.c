@@ -35,6 +35,7 @@
 #include <unistd.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <signal.h>
 
 #include "hal.h"
 #include "dma_tx.h"
@@ -65,6 +66,20 @@
 /* --------------------------------------------------------------------------
  * Globals
  * -------------------------------------------------------------------------- */
+
+static volatile sig_atomic_t g_shutdown = 0;
+static bool g_hal_active = false;
+
+static void shutdown_handler(int sig) {
+    (void)sig;
+    g_shutdown = 1;
+}
+
+/* atexit callback: ensure TX is stopped if process exits uncleanly */
+static void atexit_tx_stop(void) {
+    if (g_hal_active)
+        dma_tx_stop();
+}
 
 static int g_max_level = MAX_LEVELS;
 static uint64_t g_freq_hz = 3456000000ULL;  /* 3456 MHz — amateur 9cm, no WiFi/BT/cellular */
@@ -159,6 +174,7 @@ static int tx_and_capture(const float *tx_real, const float *tx_imag,
         if (dma_tx_trigger() != 0) {
             dma_rx_stop();
             free(*out_real); free(*out_imag);
+            *out_real = NULL; *out_imag = NULL;
             return -1;
         }
 
@@ -213,6 +229,7 @@ static int tx_and_capture(const float *tx_real, const float *tx_imag,
         if (dma_tx_trigger() != 0) {
             dma_rx_stop();
             free(*out_real); free(*out_imag);
+            *out_real = NULL; *out_imag = NULL;
             return -1;
         }
 
@@ -387,32 +404,30 @@ static bool run_level_1(void) {
     float peak_mag = 0;
     int peak_bin = find_fft_peak(rx_re + fft_start, rx_im + fft_start, fft_len, &peak_mag);
 
-    /* Expected bin: tone_freq / (Fs / N), or its negative mirror */
+    /* Expected bin: tone_freq / (Fs / N) */
     double bin_resolution = (double)SAMPLE_RATE_HZ / (double)fft_len;
     int expected_bin_pos = (int)(tone_freq / bin_resolution + 0.5);
-    int expected_bin_neg = (int)fft_len - expected_bin_pos;
 
-    /* Check error against both positive and negative frequency */
-    int err_pos = abs(peak_bin - expected_bin_pos);
-    if (err_pos > (int)(fft_len / 2)) err_pos = (int)fft_len - err_pos;
-    int err_neg = abs(peak_bin - expected_bin_neg);
-    if (err_neg > (int)(fft_len / 2)) err_neg = (int)fft_len - err_neg;
-    int bin_error = err_pos < err_neg ? err_pos : err_neg;
+    /* Check error: L1 allows ±2 bins (per documentation).
+     * Only check against the POSITIVE frequency bin — if I/Q are swapped,
+     * the peak appears at the negative bin and should fail. */
+    int bin_error = abs(peak_bin - expected_bin_pos);
+    if (bin_error > (int)(fft_len / 2)) bin_error = (int)fft_len - bin_error;
 
     if (g_verbose)
-        fprintf(stderr, "    L1: energy=%.2e, peak_bin=%d, expected=±%d, error=%d\n",
+        fprintf(stderr, "    L1: energy=%.2e, peak_bin=%d, expected=%d, error=%d\n",
                 total_energy, peak_bin, expected_bin_pos, bin_error);
 
     free(rx_re); free(rx_im);
 
     /* L1 criterion: energy is strong AND peak is near expected frequency.
-     * Tolerance of ±30 bins allows for TX/RX LO offset (CFO). */
-    if (total_energy > 100.0 && bin_error <= 30) {
-        snprintf(detail, sizeof(detail), "peak_bin=%d expected=±%d (err=%d) energy=%.0f",
+     * Tolerance of ±2 bins (spectral leakage from windowing). */
+    if (total_energy > 100.0 && bin_error <= 2) {
+        snprintf(detail, sizeof(detail), "peak_bin=%d expected=%d (err=%d) energy=%.0f",
                  peak_bin, expected_bin_pos, bin_error, total_energy);
         return true;
     } else {
-        snprintf(detail, sizeof(detail), "peak_bin=%d expected=±%d (err=%d) energy=%.2e",
+        snprintf(detail, sizeof(detail), "peak_bin=%d expected=%d (err=%d) energy=%.2e",
                  peak_bin, expected_bin_pos, bin_error, total_energy);
         return false;
     }
@@ -469,28 +484,28 @@ static bool run_level_2(void) {
 
     double bin_resolution = (double)SAMPLE_RATE_HZ / (double)fft_len;
     int expected_bin_pos = (int)(tone_freq / bin_resolution + 0.5);
-    int expected_bin_neg = (int)fft_len - expected_bin_pos;
 
-    /* Check error against both positive and negative frequency */
-    int err_pos = abs(peak_bin - expected_bin_pos);
-    if (err_pos > (int)(fft_len / 2)) err_pos = (int)fft_len - err_pos;
-    int err_neg = abs(peak_bin - expected_bin_neg);
-    if (err_neg > (int)(fft_len / 2)) err_neg = (int)fft_len - err_neg;
-    int bin_error = err_pos < err_neg ? err_pos : err_neg;
+    /* Check error against POSITIVE frequency bin only.
+     * If I/Q are swapped, cos+j*sin becomes cos-j*sin (conjugate),
+     * mirroring the peak to the negative bin — which must fail L2. */
+    int bin_error = abs(peak_bin - expected_bin_pos);
+    if (bin_error > (int)(fft_len / 2)) bin_error = (int)fft_len - bin_error;
 
     if (g_verbose)
-        fprintf(stderr, "    L2: peak_bin=%d expected=±%d err=%d, ratio=%.1f dB\n",
+        fprintf(stderr, "    L2: peak_bin=%d expected=%d err=%d, ratio=%.1f dB\n",
                 peak_bin, expected_bin_pos, bin_error, ratio_db);
 
     free(rx_re); free(rx_im);
 
-    /* L2 criterion: peak within ±30 bins of expected freq, >20 dB above floor */
-    if (bin_error <= 30 && ratio_db > 20.0) {
+    /* L2 criterion: peak within ±2 bins of expected freq, >20 dB above floor.
+     * ±2 bins accommodates TX/RX LO offset (CFO) which scales with carrier
+     * frequency — at 5 GHz, ~5 kHz offset = 1 bin at 20M/4096. */
+    if (bin_error <= 2 && ratio_db > 20.0) {
         snprintf(detail, sizeof(detail), "bin=%d (err=%d) %.1fdB above floor",
                  peak_bin, bin_error, ratio_db);
         return true;
     } else {
-        snprintf(detail, sizeof(detail), "bin=%d expected=±%d (err=%d) ratio=%.1fdB",
+        snprintf(detail, sizeof(detail), "bin=%d expected=%d (err=%d) ratio=%.1fdB",
                  peak_bin, expected_bin_pos, bin_error, ratio_db);
         return false;
     }
@@ -528,30 +543,38 @@ static bool run_level_3(void) {
     }
 
     /* L3 criterion: verify the chirp signal was received without sample drops.
-     * Complex cross-correlation fails due to CFO (~100 kHz LO offset).
-     * Instead, use power-envelope correlation which is CFO-insensitive:
-     * compute |rx|^2 envelope and correlate against |tx|^2 envelope. */
+     *
+     * Method: the TX chirp has constant power (unit modulus), so the received
+     * signal's power envelope should be flat (modulo noise/AGC).  Dropped
+     * samples produce near-zero-power blocks that stand out against the signal.
+     *
+     * Previous approach (power-envelope normalized cross-correlation) was
+     * degenerate: ref_env≡1.0 for unit-modulus TX, collapsing the metric to
+     * mean/rms (envelope flatness) which passes noise, CW, reversed chirps,
+     * and even 25% drops.
+     *
+     * New approach: compute per-block power, find the signal region (blocks
+     * above noise floor), then verify continuity — no dropout blocks within
+     * the signal region.  This detects:
+     *   - Dropped samples (near-zero power blocks)
+     *   - DMA stalls (contiguous zero runs)
+     *   - Buffer overruns (stale/zero data)
+     * While remaining insensitive to CFO, gain variation, and capture alignment. */
 
-    /* Compute TX power envelope (block averages for robustness) */
+    /* Compute RX power envelope (block averages) */
     size_t block = 64;
-    size_t n_blocks_ref = chirp_samples / block;
     size_t n_blocks_sig = (size_t)captured / block;
-    float *ref_env = calloc(n_blocks_ref, sizeof(float));
-    float *sig_env = calloc(n_blocks_sig, sizeof(float));
-    if (!ref_env || !sig_env) {
-        free(ref_env); free(sig_env);
+    if (n_blocks_sig < 10) {
         free(tx_re); free(tx_im); free(rx_re); free(rx_im);
-        snprintf(detail, sizeof(detail), "alloc failed");
+        snprintf(detail, sizeof(detail), "too few blocks (%zu)", n_blocks_sig);
         return false;
     }
 
-    for (size_t b = 0; b < n_blocks_ref; b++) {
-        double pwr = 0;
-        for (size_t i = 0; i < block; i++) {
-            size_t idx = SILENCE_PAD + b * block + i;
-            pwr += tx_re[idx] * tx_re[idx] + tx_im[idx] * tx_im[idx];
-        }
-        ref_env[b] = (float)(pwr / (double)block);
+    float *sig_env = calloc(n_blocks_sig, sizeof(float));
+    if (!sig_env) {
+        free(tx_re); free(tx_im); free(rx_re); free(rx_im);
+        snprintf(detail, sizeof(detail), "alloc failed");
+        return false;
     }
 
     for (size_t b = 0; b < n_blocks_sig; b++) {
@@ -563,39 +586,74 @@ static bool run_level_3(void) {
         sig_env[b] = (float)(pwr / (double)block);
     }
 
-    /* Normalized cross-correlation of power envelopes */
-    float best_corr = 0;
-    if (n_blocks_sig >= n_blocks_ref) {
-        size_t search = n_blocks_sig - n_blocks_ref;
-        if (search > 200) search = 200;
-        double ref_energy = 0;
-        for (size_t i = 0; i < n_blocks_ref; i++)
-            ref_energy += (double)ref_env[i] * ref_env[i];
+    /* Find the signal region: blocks above a coarse noise threshold.
+     * The TX is SILENCE_PAD + chirp + SILENCE_PAD, so the capture has
+     * silence on both ends.  Find the contiguous run of "active" blocks. */
+    float max_pwr = 0;
+    for (size_t b = 0; b < n_blocks_sig; b++)
+        if (sig_env[b] > max_pwr) max_pwr = sig_env[b];
 
-        for (size_t lag = 0; lag < search; lag++) {
-            double dot = 0, sig_energy = 0;
-            for (size_t i = 0; i < n_blocks_ref; i++) {
-                dot += (double)ref_env[i] * sig_env[lag + i];
-                sig_energy += (double)sig_env[lag + i] * sig_env[lag + i];
-            }
-            double norm = sqrt(ref_energy * sig_energy);
-            if (norm > 0) {
-                float val = (float)(dot / norm);
-                if (val > best_corr) best_corr = val;
-            }
-        }
+    float signal_threshold = max_pwr * 0.1f;  /* 10% of peak block power */
+    size_t sig_start = 0, sig_end = n_blocks_sig;
+
+    /* Find first block above threshold */
+    for (size_t b = 0; b < n_blocks_sig; b++) {
+        if (sig_env[b] > signal_threshold) { sig_start = b; break; }
+    }
+    /* Find last block above threshold */
+    for (size_t b = n_blocks_sig; b > sig_start; b--) {
+        if (sig_env[b-1] > signal_threshold) { sig_end = b; break; }
     }
 
-    if (g_verbose)
-        fprintf(stderr, "    L3: power-envelope correlation = %.4f (threshold: 0.8)\n", best_corr);
+    size_t n_signal_blocks = sig_end - sig_start;
+    bool has_signal = max_pwr > 0.001f && n_signal_blocks >= 10;
 
-    free(ref_env); free(sig_env);
+    /* Count dropouts WITHIN the signal region only.
+     * A dropout: block power drops below 25% of median signal power. */
+    int dropouts = 0;
+    if (has_signal && n_signal_blocks > 0) {
+        /* Compute median of signal region */
+        float *sorted = malloc(n_signal_blocks * sizeof(float));
+        if (sorted) {
+            memcpy(sorted, &sig_env[sig_start], n_signal_blocks * sizeof(float));
+            for (size_t i = 1; i < n_signal_blocks; i++) {
+                float key = sorted[i];
+                size_t j = i;
+                while (j > 0 && sorted[j-1] > key) {
+                    sorted[j] = sorted[j-1];
+                    j--;
+                }
+                sorted[j] = key;
+            }
+            float median_pwr = sorted[n_signal_blocks / 2];
+            float dropout_floor = median_pwr * 0.10f;
+            free(sorted);
+
+            for (size_t b = sig_start; b < sig_end; b++) {
+                if (sig_env[b] < dropout_floor)
+                    dropouts++;
+            }
+
+            if (g_verbose)
+                fprintf(stderr, "    L3: signal_blocks=%zu/%zu median=%.4f dropouts=%d\n",
+                        n_signal_blocks, n_blocks_sig, median_pwr, dropouts);
+        }
+    } else if (g_verbose) {
+        fprintf(stderr, "    L3: no signal region found (max_pwr=%.4f, signal_blocks=%zu)\n",
+                max_pwr, n_signal_blocks);
+    }
+
+    free(sig_env);
     free(tx_re); free(tx_im);
     free(rx_re); free(rx_im);
 
-    snprintf(detail, sizeof(detail), "env_corr=%.4f", best_corr);
+    snprintf(detail, sizeof(detail), "signal_blocks=%zu dropouts=%d has_signal=%d",
+             n_signal_blocks, dropouts, has_signal);
 
-    return (best_corr > 0.8f);
+    /* PASS: signal present and at most 1 dropout (boundary tolerance).
+     * A single dropout at the signal edge is expected — the transition
+     * from silence to chirp produces one partial-power block. */
+    return has_signal && (dropouts <= 1);
 }
 
 /* --------------------------------------------------------------------------
@@ -936,14 +994,20 @@ int main(int argc, char *argv[]) {
             g_cyclic ? "cyclic" : "one-shot");
 
     /* Initialize */
+    signal(SIGINT, shutdown_handler);
+    signal(SIGTERM, shutdown_handler);
+    atexit(atexit_tx_stop);
+
     if (hal_init() != 0) {
         fprintf(stderr, "ERROR: hal_init failed\n");
         return 1;
     }
+    g_hal_active = true;
 
     g_fft_plan = lib80211_fft_plan_create();
     if (!g_fft_plan) {
         fprintf(stderr, "ERROR: fft_plan_create failed\n");
+        g_hal_active = false;
         hal_cleanup();
         return 1;
     }
@@ -989,6 +1053,7 @@ int main(int argc, char *argv[]) {
                100.0 * pass / g_repeat);
 
         lib80211_fft_plan_destroy(g_fft_plan);
+        g_hal_active = false;
         hal_cleanup();
         return (pass == g_repeat) ? 0 : 1;
     }
@@ -1037,6 +1102,7 @@ int main(int argc, char *argv[]) {
     }
 
     lib80211_fft_plan_destroy(g_fft_plan);
+    g_hal_active = false;
     hal_cleanup();
 
     /* JSON output */

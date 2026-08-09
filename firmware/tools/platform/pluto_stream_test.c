@@ -25,12 +25,24 @@
 #include <unistd.h>
 #include <math.h>
 #include <time.h>
+#include <signal.h>
 #include <arm_neon.h>
 
 #include "hal.h"
 #include "dma_tx.h"
 #include "dma_rx.h"
 #include "convert.h"
+
+/* --------------------------------------------------------------------------
+ * Signal handling — ensure TX is stopped on Ctrl-C / SIGTERM
+ * -------------------------------------------------------------------------- */
+
+static volatile sig_atomic_t g_shutdown = 0;
+
+static void shutdown_handler(int sig) {
+    (void)sig;
+    g_shutdown = 1;
+}
 
 /* --------------------------------------------------------------------------
  * Defaults
@@ -168,7 +180,9 @@ static void gen_chirp_chunk(float *re, float *im, size_t n,
 
     /* Main NEON loop: 4 samples per iteration */
     for (; i + 4 <= n; i += 4) {
-        /* Compute 4 phase values using the running accumulator */
+        /* Compute 4 phase values using the running accumulator.
+         * Phase is range-reduced at chirp boundaries (not per-sample)
+         * to prevent unbounded growth while avoiding costly fmod. */
         float phases[4];
         for (int j = 0; j < 4; j++) {
             phases[j] = (float)cs->phase;
@@ -178,7 +192,10 @@ static void gen_chirp_chunk(float *re, float *im, size_t n,
             if (cs->t >= cs->chirp_len) {
                 cs->t     = 0;
                 cs->dp    = cs->dp_base;
-                /* Keep phase continuous (don't reset to 0) */
+                /* Range-reduce phase at chirp boundary to prevent unbounded
+                 * growth.  Keeps float32 cast accurate (ULP < 1e-4 rad when
+                 * |phase| < 2π). */
+                cs->phase = fmod(cs->phase, 2.0 * M_PI);
             }
         }
 
@@ -201,6 +218,7 @@ static void gen_chirp_chunk(float *re, float *im, size_t n,
         if (cs->t >= cs->chirp_len) {
             cs->t     = 0;
             cs->dp    = cs->dp_base;
+            cs->phase = fmod(cs->phase, 2.0 * M_PI);
         }
     }
 }
@@ -341,7 +359,14 @@ int main(int argc, char *argv[])
     hal_ad9361_set_rx_gain(RX_GAIN);
     hal_ad9361_set_tx_attenuation(tx_atten);
 
-    usleep(100000);
+    /* Allow AD9361 to settle after rate change.  300ms covers PLL relock
+     * + DC tracking loop convergence, especially after a large sample rate
+     * change (e.g. 20 MSPS → 2.5 MSPS when running after sigladder). */
+    usleep(300000);
+
+    /* Install signal handlers before starting any TX */
+    signal(SIGINT, shutdown_handler);
+    signal(SIGTERM, shutdown_handler);
 
     /* Start RX DMA */
     if (dma_rx_start() != 0) {
@@ -353,9 +378,9 @@ int main(int argc, char *argv[])
     /* Record RX start position */
     uint32_t rx_t0 = dma_rx_wr_ptr();
 
-    /* Start streaming TX */
-    if (dma_tx_stream_start() != 0) {
-        fprintf(stderr, "ERROR: dma_tx_stream_start failed\n");
+    /* Arm streaming TX (does NOT start the drain FSM yet) */
+    if (dma_tx_stream_arm() != 0) {
+        fprintf(stderr, "ERROR: dma_tx_stream_arm failed\n");
         dma_rx_stop();
         hal_cleanup();
         return 1;
@@ -383,6 +408,32 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    /* Pre-fill: feed several chunks before triggering so the drain FSM
+     * doesn't run ahead of an empty ring. */
+    size_t prefill_target = DMA_TX_STREAM_CHUNK * 4;
+    while (total_fed < prefill_target) {
+        gen_chirp_chunk(chunk_re, chunk_im, DMA_TX_STREAM_CHUNK, &chirp);
+        if (dma_tx_stream_feed(chunk_re, chunk_im, DMA_TX_STREAM_CHUNK) != 0) {
+            fprintf(stderr, "ERROR: pre-fill feed failed\n");
+            free(chunk_re); free(chunk_im);
+            dma_tx_stream_stop();
+            dma_rx_stop();
+            hal_cleanup();
+            return 1;
+        }
+        total_fed += DMA_TX_STREAM_CHUNK;
+    }
+
+    /* Now trigger — drain FSM starts with data already available */
+    if (dma_tx_stream_trigger() != 0) {
+        fprintf(stderr, "ERROR: dma_tx_stream_trigger failed\n");
+        free(chunk_re); free(chunk_im);
+        dma_tx_stream_stop();
+        dma_rx_stop();
+        hal_cleanup();
+        return 1;
+    }
+
     fprintf(stderr, "Streaming for %d s at %llu Hz...\n",
             duration_sec, (unsigned long long)sample_rate_hz);
 
@@ -392,7 +443,12 @@ int main(int argc, char *argv[])
         start_ms = (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
     }
 
+    int consecutive_stalls = 0;
+
     while (1) {
+        if (g_shutdown)
+            break;
+
         struct timespec ts;
         clock_gettime(CLOCK_MONOTONIC, &ts);
         uint64_t now_ms = (uint64_t)ts.tv_sec * 1000
@@ -407,9 +463,16 @@ int main(int argc, char *argv[])
 
         if (avail < DMA_TX_STREAM_CHUNK) {
             stall_cycles++;
+            consecutive_stalls++;
+            if (consecutive_stalls > 100) {
+                fprintf(stderr, "ERROR: stuck — %d consecutive stalls "
+                        "(avail=%d)\n", consecutive_stalls, avail);
+                break;
+            }
             usleep(200);
             continue;
         }
+        consecutive_stalls = 0;
 
         feed_cycles++;
         gen_chirp_chunk(chunk_re, chunk_im, DMA_TX_STREAM_CHUNK, &chirp);
@@ -442,6 +505,10 @@ int main(int argc, char *argv[])
 
     dma_tx_stream_stop();
 
+    /* Read DAC valid miss counter before cleanup — counts drain FSM
+     * cycles where dac_valid was not asserted (underrun indicator). */
+    uint32_t dac_miss = hal_reg_read(REG_IQ_DMA_TX_DAC_MISS);
+
     free(chunk_re); free(chunk_im);
 
     /* Compute RX available */
@@ -460,7 +527,7 @@ int main(int argc, char *argv[])
      * post-drain silence which would false-positive as dropouts.
      * Skip the first 10ms (startup transient) and cap at total_fed. */
     size_t cap_samples = (size_t)rx_available;
-    size_t skip_samples = (size_t)(sample_rate_hz / 100);  /* 10ms */
+    size_t skip_samples = (size_t)(sample_rate_hz / 10);  /* 100ms — skip startup transient and PLL settling */
     size_t analyze_samples = total_fed > skip_samples
                            ? total_fed - skip_samples : 0;
     if (analyze_samples > cap_samples - skip_samples)
@@ -493,7 +560,20 @@ int main(int argc, char *argv[])
     float *ana_im = rx_im + skip_samples;
     compute_envelope_stats(ana_re, ana_im, analyze_samples, block, &env);
 
-    double dropout_threshold = env.mean * 0.1;
+    /* Dropout detection: a block whose power is below threshold is a dropout.
+     * Use an absolute minimum floor (not purely self-referential) so the test
+     * fails when no signal is present (e.g. loopback cable unplugged). */
+    if (env.mean < 0.001) {
+        fprintf(stderr, "\n  FAIL: No signal detected (mean envelope %.6f)\n",
+                env.mean);
+        free(rx_re); free(rx_im);
+        dma_tx_stream_stop();
+        hal_cleanup();
+        printf("{\"passed\":false,\"reason\":\"no_signal\","
+               "\"envelope_mean\":%.9f}\n", env.mean);
+        return 1;
+    }
+    double dropout_threshold = fmax(env.mean * 0.1, 0.001);
     int dropouts = (int)count_dropouts(ana_re, ana_im, analyze_samples, block,
                                        dropout_threshold, verbose,
                                        sample_rate_hz);
@@ -512,6 +592,7 @@ int main(int argc, char *argv[])
     fprintf(stderr, "  Min buffer avail: %d samples (%.1f ms)\n",
             min_available,
             (double)min_available * 1000.0 / (double)sample_rate_hz);
+    fprintf(stderr, "  DAC valid miss:   %u\n", dac_miss);
     fprintf(stderr, "  RX captured:      %zu samples\n", cap_samples);
     fprintf(stderr, "  RX analyzed:      %zu samples (skipped first %zu)\n",
             analyze_samples, skip_samples);
@@ -535,12 +616,12 @@ int main(int argc, char *argv[])
     printf("{\"passed\":%s,\"sample_rate_hz\":%llu,"
            "\"duration_sec\":%d,\"fed\":%zu,"
            "\"cycles\":%d,\"stalls\":%d,\"min_avail\":%d,"
-           "\"dropouts\":%d,\"n_blocks\":%zu}\n",
+           "\"dac_miss\":%u,\"dropouts\":%d,\"n_blocks\":%zu}\n",
            passed ? "true" : "false",
            (unsigned long long)sample_rate_hz,
            duration_sec, total_fed,
            feed_cycles, stall_cycles, min_available,
-           dropouts, n_blocks);
+           dac_miss, dropouts, n_blocks);
 
     hal_cleanup();
     return passed ? 0 : 1;

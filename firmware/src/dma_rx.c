@@ -106,6 +106,15 @@ int dma_rx_capture(size_t n_samples, float *out_real, float *out_imag,
     volatile uint32_t *rx_buf = hal_ddr_rx_buf();
     uint32_t read_ptr = start_ptr;
 
+    /*
+     * WR_PTR advancing is what publishes the samples behind it, so the data
+     * loads must not be hoisted above the poll above.  convert_rx_to_float
+     * reads in bulk via memcpy, which is not volatile-ordered, so the
+     * ordering has to be stated here rather than inferred from the pointer
+     * type.  One barrier per capture is free.
+     */
+    __sync_synchronize();
+
     /* Check if read wraps around the ring buffer */
     if (read_ptr + (uint32_t)n_samples <= DMA_RX_BUF_SAMPLES) {
         /* Contiguous read */
@@ -119,6 +128,38 @@ int dma_rx_capture(size_t n_samples, float *out_real, float *out_imag,
                             out_real, out_imag);
         convert_rx_to_float(&rx_buf[0], second_chunk,
                             &out_real[first_chunk], &out_imag[first_chunk]);
+    }
+
+    return (int)n_samples;
+}
+
+int dma_rx_read(uint32_t read_ptr, size_t n_samples,
+                float *out_real, float *out_imag)
+{
+    if (n_samples == 0)
+        return 0;
+
+    if (n_samples > DMA_RX_BUF_SAMPLES) {
+        fprintf(stderr, "dma_rx: read %zu samples exceeds buffer (%u)\n",
+                n_samples, DMA_RX_BUF_SAMPLES);
+        return -1;
+    }
+
+    volatile uint32_t *rx_buf = hal_ddr_rx_buf();
+
+    /* Ordered against the caller's WR_PTR check — see dma_rx_capture(). */
+    __sync_synchronize();
+
+    if (read_ptr + (uint32_t)n_samples <= DMA_RX_BUF_SAMPLES) {
+        convert_rx_to_float(&rx_buf[read_ptr], n_samples,
+                            out_real, out_imag);
+    } else {
+        size_t first = DMA_RX_BUF_SAMPLES - read_ptr;
+        size_t second = n_samples - first;
+        convert_rx_to_float(&rx_buf[read_ptr], first,
+                            out_real, out_imag);
+        convert_rx_to_float(&rx_buf[0], second,
+                            &out_real[first], &out_imag[first]);
     }
 
     return (int)n_samples;
