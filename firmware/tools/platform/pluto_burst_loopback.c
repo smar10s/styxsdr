@@ -376,7 +376,7 @@ int main(int argc, char *argv[])
     hal_ad9361_set_tx_bandwidth(BANDWIDTH_HZ);
     hal_ad9361_set_rx_gain_mode("manual");
     hal_ad9361_set_rx_gain(22.0);
-    hal_ad9361_set_tx_attenuation(3000);  /* -3 dB (match pluto_loopback) */
+    hal_ad9361_set_tx_attenuation(3.0);  /* 3 dB (match pluto_loopback) */
     usleep(100000);
 
     lib80211_fft_plan *plan = lib80211_fft_plan_create();

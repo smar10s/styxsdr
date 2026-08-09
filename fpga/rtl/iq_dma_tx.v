@@ -419,7 +419,6 @@ module iq_dma_tx #(
     // is best-effort (potential torn reads on multi-bit crossing).
     // DO NOT use tx_ptr for synchronization decisions on ARM.
     // Use tx_done (properly synced) for completion gating.
-    reg [31:0] tx_ptr;
 
     // RD_PTR Gray-code CDC: l_clk -> s_axi_aclk
     wire [31:0] rd_ptr_gray = tx_ptr ^ (tx_ptr >> 1);

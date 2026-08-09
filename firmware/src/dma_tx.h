@@ -70,6 +70,62 @@ bool dma_tx_done(void);
 // ---- Continuous streaming API ----
 
 /**
+ * Arm the streaming engine without starting it.
+ *
+ * Resets the TX path, zeroes the DDR ring, and configures DDR_BASE,
+ * TX_COUNT and WR_PTR — but leaves ENABLE and TRIGGER clear so the drain
+ * FSM stays idle.  Feed one or more chunks, then call
+ * dma_tx_stream_trigger().
+ *
+ * Triggering an empty ring is a trap: the drain FSM immediately runs
+ * ahead of the write cursor, and every subsequent feed is chasing a read
+ * pointer that is already in front of it.  Pre-filling first is the same
+ * two-phase discipline dma_tx_load()/dma_tx_trigger() uses for one-shot
+ * TX.
+ *
+ * @return  0 on success
+ */
+int dma_tx_stream_arm(void);
+
+/**
+ * Start the armed streaming engine.  Single register write.
+ *
+ * @return  0 on success, -1 if the engine failed to start
+ */
+int dma_tx_stream_trigger(void);
+
+/**
+ * Signed buffer depth, in samples.
+ *
+ * Positive: the ARM is that many samples ahead of the FPGA — the healthy
+ * case, and the value to compare against a latency budget.
+ * Negative: the drain FSM has overtaken the write cursor and is emitting
+ * stale ring contents.  That is an underrun, and for FM it is audible as
+ * time-stretched ("dragging") audio rather than a click, because the
+ * modulation timeline lives in the phase trajectory.
+ *
+ * Prefer this over dma_tx_stream_available() for flow control: a plain
+ * unsigned "space free" figure reports a small value both when the ring
+ * is full and when it has underrun, so a feeder that waits on it will
+ * throttle itself into a permanent underrun it can never exit.
+ *
+ * @return  samples queued (positive) or overrun distance (negative)
+ */
+int32_t dma_tx_stream_depth(void);
+
+/**
+ * Total samples the FPGA has emitted since dma_tx_stream_trigger().
+ *
+ * Monotonic across ring wraps.  Divide by elapsed time to get the true
+ * output sample rate: the drain FSM only advances RD_PTR when it actually
+ * emits, so a deficit against the nominal DAC rate is exactly the
+ * time-stretch a receiver hears.
+ *
+ * @return  samples emitted
+ */
+uint64_t dma_tx_stream_emitted(void);
+
+/**
  * Start continuous TX streaming.
  *
  * Configures the TX DMA for ring-buffer streaming: writes DDR_BASE,
@@ -106,15 +162,26 @@ int dma_tx_stream_feed(const float *in_real, const float *in_imag,
                        size_t n_samples);
 
 /**
- * Feed a chunk of samples with a fixed peak scale instead of auto-scaling.
+ * Feed a chunk using a caller-supplied fixed scale instead of auto-scaling.
  *
- * Same as dma_tx_stream_feed() but uses convert_float_to_tx() with the
- * caller-provided peak_scale (e.g. 2047.0f) instead of computing auto-scale
- * per chunk.  Essential for signals where per-chunk amplitude variation
- * would cause auto-scale to introduce amplitude modulation (e.g. LoRa
- * chirps with varying IQ phase).
+ * Prefer this whenever |IQ| is known by construction, as it is for FM and
+ * any other constant-envelope modulation.  Two reasons:
  *
- * @param peak_scale  Fixed scale factor (typically 2047.0f for full-scale)
+ *  - Speed.  convert_float_to_tx_auto() makes a peak-finding pass over the
+ *    chunk before packing it, and that pass costs more than an entire FM
+ *    modulation step.  Measured on a Cortex-A9 at 2.1 MSPS it is the
+ *    difference between 1.69x and 1.82x headroom.
+ *
+ *  - Correctness.  Auto-scale normalises whatever chunk it is handed, so a
+ *    short or quiet chunk gets boosted to full scale and the transmitted
+ *    amplitude steps at every chunk boundary.
+ *
+ * @param in_real     Real (I) component
+ * @param in_imag     Imaginary (Q) component
+ * @param n_samples   Number of samples to feed
+ * @param peak_scale  Multiplier applied before clamping to [-2047, 2047];
+ *                    use 2047.0f for unit-magnitude input
+ * @return            0 on success, -1 if the buffer would overflow
  */
 int dma_tx_stream_feed_fixed(const float *in_real, const float *in_imag,
                              size_t n_samples, float peak_scale);
@@ -134,14 +201,29 @@ uint32_t dma_tx_stream_rd_ptr(void);
  * Return how many samples can safely be written without overrunning
  * the FPGA's read position.
  *
- * Computed as (rd_ptr - wr_cursor - 1) modulo buffer size.  Always
- * leaves at least 1 sample of headroom to avoid fill_ptr == rd_ptr
- * ambiguity (fill FSM stops at fill_ptr >= wr_ptr, so wr_ptr must
- * never catch up to rd_ptr from the other side).
+ * Derived from dma_tx_stream_depth(), so an underrun correctly reports
+ * the whole ring as writable rather than "nearly full".  Always leaves 1
+ * sample of headroom to avoid fill_ptr == rd_ptr ambiguity.
  *
  * @return  number of samples available for feeding
  */
 int dma_tx_stream_available(void);
+
+/**
+ * Block until the FPGA has consumed all data written to the DDR
+ * streaming buffer at the given sample rate.  Call this after the
+ * last dma_tx_stream_feed() and before dma_tx_stream_stop() to
+ * avoid cutting off unread data.
+ *
+ * Uses a time-based drain: computes (wr_cursor - rd_ptr) samples
+ * remaining and sleeps for (samples / sample_rate) + 50 ms margin.
+ * The rd_ptr is a conservative Gray-code-synchronized value from the
+ * FPGA, so the pending count can only overestimate — never truncate
+ * unread data.
+ *
+ * @param sample_rate_hz  DAC sample rate (Hz)
+ */
+void dma_tx_stream_drain(uint32_t sample_rate_hz);
 
 /**
  * Stop the streaming TX engine gracefully.

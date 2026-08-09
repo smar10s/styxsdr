@@ -223,7 +223,9 @@ fi
 echo ""
 
 # ---- Log entry ----
-LOG_ENTRY="{\"timestamp\":\"${TIMESTAMP}\",\"event\":\"hardware_baseline\",\"branch\":\"${BRANCH}\",\"commit\":\"${GIT_SHA}\",\"fingerprint\":\"${FINGERPRINT}\",\"dma_pass\":${DMA_PASSED},\"sigladder\":${SIGLADDER_PASS},\"arm_5180\":{${ARM5180_LOG}},\"arm_915\":{${ARM915_LOG}},\"trials\":10}"
+STREAM_RESULT=${STREAM_PASS:+1}
+STREAM_RESULT=${STREAM_RESULT:-0}
+LOG_ENTRY="{\"timestamp\":\"${TIMESTAMP}\",\"event\":\"hardware_baseline\",\"branch\":\"${BRANCH}\",\"commit\":\"${GIT_SHA}\",\"fingerprint\":\"${FINGERPRINT}\",\"dma_pass\":${DMA_PASSED},\"sigladder\":${SIGLADDER_PASS},\"stream_pass\":${STREAM_RESULT},\"stream_dropouts\":${STREAM_DROPOUTS:-0},\"arm_5180\":{${ARM5180_LOG}},\"arm_915\":{${ARM915_LOG}},\"trials\":10}"
 echo "$LOG_ENTRY" >> "$LOG_FILE"
 
 echo "========================================"

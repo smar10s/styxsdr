@@ -143,10 +143,12 @@ int hal_init(void)
         goto fail;
     }
 
-    /* Accelerator register regions — may or may not be populated depending
-     * on bitstream.  mmap succeeds regardless (it's just address space);
-     * reads return 0xDEADBEEF or bus error if nothing is there.  The
-     * accelerator library is responsible for probing PROJECT_ID first. */
+    /* Accelerator register regions — only populated by child bitstreams
+     * (deimos, lora, etc.) that instantiate AXI-Lite slaves here.
+     * mmap succeeds regardless (kernel maps the physical page); accessing
+     * an unpopulated region causes AXI DECERR → SIGBUS on Zynq.
+     * The accelerator library MUST check PROJECT_ID (0x43C00004) before
+     * touching these regions. */
     map_accel_a = (volatile uint32_t *)mmap(NULL, REG_REGION_SIZE,
         PROT_READ | PROT_WRITE, MAP_SHARED, mem_fd, REG_ACCEL_A_BASE);
     if (map_accel_a == MAP_FAILED) {
@@ -482,4 +484,15 @@ int hal_ad9361_run_calibration(void)
     /* Return to auto mode */
     rc |= sysfs_write_str(AD9361_IIO_PATH "calib_mode", "auto");
     return rc;
+}
+
+int hal_ad9361_load_rx_fir(const char *config)
+{
+    return sysfs_write_str(AD9361_IIO_PATH "filter_fir_config", config);
+}
+
+int hal_ad9361_set_rx_fir_en(int enable)
+{
+    return sysfs_write_ll(AD9361_IIO_PATH "in_voltage_filter_fir_en",
+                          enable ? 1 : 0);
 }
