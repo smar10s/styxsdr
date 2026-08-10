@@ -40,6 +40,7 @@
 #include <getopt.h>
 
 #include "hal.h"
+#include "styx_tool.h"
 
 /* --------------------------------------------------------------------------
  * Constants

@@ -9,13 +9,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <signal.h>
 #include <unistd.h>
 #include <stdbool.h>
 #include <stdint.h>
 
 #include "hal.h"
 #include "dma_tx.h"
+#include "styx_tool.h"
 
 #include <lib80211/fft.h>
 #include <lib80211/mac.h>
@@ -26,13 +26,6 @@
 #define SAMPLE_RATE_HZ   20000000ULL
 #define BANDWIDTH_HZ     28000000ULL
 #define SAMPLES_PER_TU   20  /* 1 TU = 1024 us ≈ 20 samples/us * 1024, but at 20 MSPS: 20 samples/us */
-
-static volatile sig_atomic_t g_running = 1;
-
-static void sigint_handler(int sig) {
-    (void)sig;
-    g_running = 0;
-}
 
 /* -------------------------------------------------------------------------- */
 
@@ -160,18 +153,27 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    hal_ad9361_set_sample_rate(SAMPLE_RATE_HZ);
-    hal_ad9361_set_tx_lo(freq);
-    hal_ad9361_set_tx_bandwidth(BANDWIDTH_HZ);
-    hal_ad9361_set_tx_attenuation(tx_atten);
+    styx_rf_config_t rf = {
+        .sample_rate_hz = SAMPLE_RATE_HZ,
+        .tx_lo_hz = freq,
+        .tx_bw_hz = BANDWIDTH_HZ,
+        .tx_atten_db = tx_atten,
+        .settle_us = 100000,
+    };
+    if (styx_rf_configure(&rf) != 0) {
+        fprintf(stderr, "ERROR: RF configuration failed\n");
+        free(tx_real); free(tx_imag);
+        hal_cleanup();
+        return 1;
+    }
 
     fprintf(stderr, "TX: freq=%llu MHz, atten=%.1f dB, rate=20 MSPS\n",
             (unsigned long long)(freq / 1000000ULL), tx_atten);
 
     /* Install signal handler BEFORE starting TX to avoid a window where
      * Ctrl-C would kill the process without stopping the transmitter. */
-    signal(SIGINT, sigint_handler);
-    signal(SIGTERM, sigint_handler);
+    styx_install_shutdown_handler();
+    styx_register_tx_cleanup(dma_tx_stop);
 
     /* Start cyclic TX DMA */
     if (dma_tx_start(tx_real, tx_imag, period_samples, true) != 0) {
@@ -183,8 +185,8 @@ int main(int argc, char *argv[]) {
 
     fprintf(stderr, "Transmitting beacon (SIGINT to stop)...\n");
 
-    /* Wait for SIGINT */
-    while (g_running) {
+    /* Wait for shutdown signal */
+    while (!styx_shutdown_requested()) {
         usleep(100000);  /* 100 ms */
     }
 

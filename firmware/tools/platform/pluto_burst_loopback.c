@@ -33,6 +33,7 @@
 #include "dma_tx.h"
 #include "dma_rx.h"
 #include "convert.h"
+#include "styx_tool.h"
 
 #include <lib80211/fft.h>
 #include <lib80211/tx.h>
@@ -151,95 +152,22 @@ static void build_manifest(burst_manifest_t *m, int n_frames,
 }
 
 /* --------------------------------------------------------------------------
- * TX + RX capture (from pluto_loopback pattern)
+ * TX + RX capture (via shared styx_tool library)
  * -------------------------------------------------------------------------- */
 
 static int tx_and_capture(const float *tx_real, const float *tx_imag,
                           size_t tx_samples, size_t capture_samples,
                           float **out_real, float **out_imag)
 {
-    *out_real = malloc(capture_samples * sizeof(float));
-    *out_imag = malloc(capture_samples * sizeof(float));
-    if (!*out_real || !*out_imag) {
-        free(*out_real); free(*out_imag);
-        *out_real = NULL; *out_imag = NULL;
-        return -1;
-    }
-
-    if (dma_rx_start() != 0) {
-        free(*out_real); free(*out_imag);
-        *out_real = NULL; *out_imag = NULL;
-        return -1;
-    }
-
-    if (dma_tx_load(tx_real, tx_imag, tx_samples, false) != 0) {
-        dma_rx_stop();
-        free(*out_real); free(*out_imag);
-        *out_real = NULL; *out_imag = NULL;
-        return -1;
-    }
-
-    uint32_t t0 = dma_rx_wr_ptr();
-
-    if (dma_tx_trigger() != 0) {
-        dma_rx_stop();
-        free(*out_real); free(*out_imag);
-        *out_real = NULL; *out_imag = NULL;
-        return -1;
-    }
-
-    unsigned int tx_us = (unsigned int)(tx_samples / 20);
-    usleep(tx_us + 5000);  /* TX duration + 5ms margin for longer bursts */
-
-    uint32_t cur = dma_rx_wr_ptr();
-    uint32_t available = (cur >= t0) ? cur - t0
-                       : (DMA_RX_BUF_SAMPLES - t0) + cur;
-    if (available < (uint32_t)capture_samples) {
-        usleep(10000);
-        cur = dma_rx_wr_ptr();
-        available = (cur >= t0) ? cur - t0
-                   : (DMA_RX_BUF_SAMPLES - t0) + cur;
-    }
-
-    dma_tx_stop();
-    dma_rx_stop();
-
-    if (available < (uint32_t)capture_samples) {
-        fprintf(stderr, "tx_and_capture: insufficient data (%u/%zu)\n",
-                available, capture_samples);
-        free(*out_real); free(*out_imag);
-        *out_real = NULL; *out_imag = NULL;
-        return -1;
-    }
-
-    volatile uint32_t *rx_buf = hal_ddr_rx_buf();
-    uint32_t read_ptr = t0;
-    if (read_ptr + (uint32_t)capture_samples <= DMA_RX_BUF_SAMPLES) {
-        convert_rx_to_float(&rx_buf[read_ptr], capture_samples,
-                            *out_real, *out_imag);
-    } else {
-        size_t first = DMA_RX_BUF_SAMPLES - read_ptr;
-        size_t second = capture_samples - first;
-        convert_rx_to_float(&rx_buf[read_ptr], first,
-                            *out_real, *out_imag);
-        convert_rx_to_float(&rx_buf[0], second,
-                            &(*out_real)[first], &(*out_imag)[first]);
-    }
-
-    /* DC offset removal */
-    double sum_re = 0.0, sum_im = 0.0;
-    for (size_t i = 0; i < capture_samples; i++) {
-        sum_re += (*out_real)[i];
-        sum_im += (*out_imag)[i];
-    }
-    float dc_re = (float)(sum_re / (double)capture_samples);
-    float dc_im = (float)(sum_im / (double)capture_samples);
-    for (size_t i = 0; i < capture_samples; i++) {
-        (*out_real)[i] -= dc_re;
-        (*out_imag)[i] -= dc_im;
-    }
-
-    return (int)capture_samples;
+    styx_capture_cfg_t cfg = {
+        .tx_re = tx_real,
+        .tx_im = tx_imag,
+        .tx_samples = tx_samples,
+        .capture_samples = capture_samples,
+        .extra_wait_us = 5000,   /* longer margin for multi-frame bursts */
+        .remove_dc = true,
+    };
+    return styx_tx_and_capture(&cfg, out_real, out_imag);
 }
 
 /* --------------------------------------------------------------------------
@@ -368,16 +296,27 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    /* Install signal handlers + TX cleanup */
+    styx_install_shutdown_handler();
+    styx_register_tx_cleanup(dma_tx_stop);
+
     uint64_t freq_local = freq;
-    hal_ad9361_set_sample_rate(SAMPLE_RATE_HZ);
-    hal_ad9361_set_rx_lo(freq_local);
-    hal_ad9361_set_tx_lo(freq_local);
-    hal_ad9361_set_rx_bandwidth(BANDWIDTH_HZ);
-    hal_ad9361_set_tx_bandwidth(BANDWIDTH_HZ);
-    hal_ad9361_set_rx_gain_mode("manual");
-    hal_ad9361_set_rx_gain(22.0);
-    hal_ad9361_set_tx_attenuation(3.0);  /* 3 dB (match pluto_loopback) */
-    usleep(100000);
+    styx_rf_config_t rf = {
+        .sample_rate_hz = SAMPLE_RATE_HZ,
+        .tx_lo_hz = freq_local,
+        .rx_lo_hz = freq_local,
+        .tx_bw_hz = BANDWIDTH_HZ,
+        .rx_bw_hz = BANDWIDTH_HZ,
+        .tx_atten_db = 3.0,
+        .rx_gain_mode = "manual",
+        .rx_gain_db = 22.0,
+        .settle_us = 100000,
+    };
+    if (styx_rf_configure(&rf) != 0) {
+        fprintf(stderr, "ERROR: RF configuration failed\n");
+        hal_cleanup();
+        return 1;
+    }
 
     lib80211_fft_plan *plan = lib80211_fft_plan_create();
     if (!plan) {

@@ -25,24 +25,13 @@
 #include <unistd.h>
 #include <math.h>
 #include <time.h>
-#include <signal.h>
 #include <arm_neon.h>
 
 #include "hal.h"
 #include "dma_tx.h"
 #include "dma_rx.h"
 #include "convert.h"
-
-/* --------------------------------------------------------------------------
- * Signal handling — ensure TX is stopped on Ctrl-C / SIGTERM
- * -------------------------------------------------------------------------- */
-
-static volatile sig_atomic_t g_shutdown = 0;
-
-static void shutdown_handler(int sig) {
-    (void)sig;
-    g_shutdown = 1;
-}
+#include "styx_tool.h"
 
 /* --------------------------------------------------------------------------
  * Defaults
@@ -350,23 +339,26 @@ int main(int argc, char *argv[])
     }
 
     /* Configure AD9361 */
-    hal_ad9361_set_sample_rate(sample_rate_hz);
-    hal_ad9361_set_tx_lo(freq_hz);
-    hal_ad9361_set_rx_lo(freq_hz);
-    hal_ad9361_set_tx_bandwidth(TX_BW_HZ);
-    hal_ad9361_set_rx_bandwidth(RX_BW_HZ);
-    hal_ad9361_set_rx_gain_mode("manual");
-    hal_ad9361_set_rx_gain(RX_GAIN);
-    hal_ad9361_set_tx_attenuation(tx_atten);
-
-    /* Allow AD9361 to settle after rate change.  300ms covers PLL relock
-     * + DC tracking loop convergence, especially after a large sample rate
-     * change (e.g. 20 MSPS → 2.5 MSPS when running after sigladder). */
-    usleep(300000);
+    styx_rf_config_t rf = {
+        .sample_rate_hz = (uint32_t)sample_rate_hz,
+        .tx_lo_hz = freq_hz,
+        .rx_lo_hz = freq_hz,
+        .tx_bw_hz = TX_BW_HZ,
+        .rx_bw_hz = RX_BW_HZ,
+        .tx_atten_db = tx_atten,
+        .rx_gain_mode = "manual",
+        .rx_gain_db = RX_GAIN,
+        .settle_us = 300000,  /* 300ms: PLL relock + DC tracking convergence */
+    };
+    if (styx_rf_configure(&rf) != 0) {
+        fprintf(stderr, "ERROR: RF configuration failed\n");
+        hal_cleanup();
+        return 1;
+    }
 
     /* Install signal handlers before starting any TX */
-    signal(SIGINT, shutdown_handler);
-    signal(SIGTERM, shutdown_handler);
+    styx_install_shutdown_handler();
+    styx_register_tx_cleanup(dma_tx_stream_stop);
 
     /* Start RX DMA */
     if (dma_rx_start() != 0) {
@@ -446,7 +438,7 @@ int main(int argc, char *argv[])
     int consecutive_stalls = 0;
 
     while (1) {
-        if (g_shutdown)
+        if (styx_shutdown_requested())
             break;
 
         struct timespec ts;

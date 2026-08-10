@@ -35,6 +35,7 @@
 
 #include "hal.h"
 #include "dma_tx.h"
+#include "styx_tool.h"
 
 #include <lib80211/fft.h>
 #include <lib80211/tx.h>
@@ -198,18 +199,27 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    /* Configure radio (same as fabric_loopback) */
-    hal_ad9361_set_sample_rate(SAMPLE_RATE_HZ);
-    hal_ad9361_set_tx_lo(freq);
-    hal_ad9361_set_rx_lo(freq);
-    hal_ad9361_set_tx_bandwidth(BANDWIDTH_HZ);
-    hal_ad9361_set_rx_bandwidth(BANDWIDTH_HZ);
-    hal_ad9361_set_rx_gain_mode("manual");
-    hal_ad9361_set_rx_gain(rx_gain);
-    hal_ad9361_set_tx_attenuation(tx_atten);
+    /* Install signal handlers + TX cleanup */
+    styx_install_shutdown_handler();
+    styx_register_tx_cleanup(dma_tx_stop);
 
-    /* Allow PLL lock and ADC settling */
-    usleep(100000);
+    /* Configure radio (same as fabric_loopback) */
+    styx_rf_config_t rf = {
+        .sample_rate_hz = SAMPLE_RATE_HZ,
+        .tx_lo_hz = freq,
+        .rx_lo_hz = freq,
+        .tx_bw_hz = BANDWIDTH_HZ,
+        .rx_bw_hz = BANDWIDTH_HZ,
+        .tx_atten_db = tx_atten,
+        .rx_gain_mode = "manual",
+        .rx_gain_db = rx_gain,
+        .settle_us = 100000,
+    };
+    if (styx_rf_configure(&rf) != 0) {
+        fprintf(stderr, "ERROR: RF configuration failed\n");
+        hal_cleanup();
+        return 1;
+    }
 
     if (verbose)
         fprintf(stderr, "ADC capture: freq=%llu MHz, rate=%d Mbps, "
