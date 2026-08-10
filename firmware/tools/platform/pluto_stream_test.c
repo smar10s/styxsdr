@@ -599,10 +599,31 @@ int main(int argc, char *argv[])
     /* Pass criteria:
      *   1. No dropouts in the active TX window
      *   2. ARM actually fed samples (total_fed > 0)
-     *   3. Effective rate >= 90% of target sample rate */
+     *   3. Effective rate >= 90% of target sample rate
+     *   4. Zero stall cycles (ARM kept ahead of drain FSM)
+     *   5. Zero DAC valid misses (drain FSM never starved for data)
+     *
+     * Criteria 4-5 require the ARM feed loop to sustain the target sample
+     * rate in real time.  On a single Cortex-A9 (667 MHz, NEON), the
+     * ceiling is ~4.3 MSPS for chirp generation + DDR write + stream_feed.
+     * The default rate (4 MSPS) leaves ~8% margin.  Above ~5 MSPS the ARM
+     * cannot keep up and stalls/dac_miss will occur — use one-shot DMA
+     * (pre-computed waveform) for higher rates. */
     double effective_rate = (double)total_fed / (double)duration_sec;
     bool rate_ok = effective_rate >= 0.9 * (double)sample_rate_hz;
-    bool passed = (dropouts == 0) && (total_fed > 0) && rate_ok;
+    bool passed = (dropouts == 0) && (total_fed > 0) && rate_ok
+               && (stall_cycles == 0) && (dac_miss == 0);
+
+    if (!passed) {
+        fprintf(stderr, "\n  FAIL:");
+        if (dropouts > 0) fprintf(stderr, " dropouts=%d", dropouts);
+        if (total_fed == 0) fprintf(stderr, " no_data_fed");
+        if (!rate_ok) fprintf(stderr, " rate_low(%.1f%%)",
+                              100.0 * effective_rate / (double)sample_rate_hz);
+        if (stall_cycles > 0) fprintf(stderr, " stalls=%d", stall_cycles);
+        if (dac_miss > 0) fprintf(stderr, " dac_miss=%u", dac_miss);
+        fprintf(stderr, "\n");
+    }
 
     fprintf(stderr, "\n  RESULT: %s\n", passed ? "PASS" : "FAIL");
     printf("{\"passed\":%s,\"sample_rate_hz\":%llu,"
@@ -613,8 +634,9 @@ int main(int argc, char *argv[])
            (unsigned long long)sample_rate_hz,
            duration_sec, total_fed,
            feed_cycles, stall_cycles, min_available,
-           dac_miss, dropouts, n_blocks);
+            dac_miss, dropouts, n_blocks);
 
+    styx_disarm_cleanup();
     hal_cleanup();
     return passed ? 0 : 1;
 }

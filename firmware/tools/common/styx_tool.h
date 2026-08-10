@@ -29,6 +29,10 @@ bool styx_shutdown_requested(void);
  * Multiple registrations are supported (max 4). */
 void styx_register_tx_cleanup(void (*fn)(void));
 
+/* Disarm all cleanup callbacks (call before hal_cleanup() in normal exit).
+ * Prevents atexit from calling into HAL after it's been torn down. */
+void styx_disarm_cleanup(void);
+
 /* --------------------------------------------------------------------------
  * AD9361 configuration
  *

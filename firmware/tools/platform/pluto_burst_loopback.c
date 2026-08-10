@@ -469,6 +469,7 @@ int main(int argc, char *argv[])
            gap_samples, seed);
 
     lib80211_fft_plan_destroy(plan);
+    styx_disarm_cleanup();
     hal_cleanup();
     return (content_match == n_frames) ? 0 : 1;
 }

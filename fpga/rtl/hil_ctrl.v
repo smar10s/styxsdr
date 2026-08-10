@@ -209,8 +209,12 @@ module hil_ctrl #(
                 aw_en <= 1;
             end
 
-            // Read handshake
-            if (~s_axi_arready && s_axi_arvalid)
+            // Read handshake — only accept AR when no R response is pending.
+            // Without the ~s_axi_rvalid guard, a second AR accepted while
+            // RVALID is still high gets consumed but never serviced (the
+            // data capture below requires ~s_axi_rvalid), deadlocking
+            // the AXI-Lite interconnect.
+            if (~s_axi_arready && s_axi_arvalid && ~s_axi_rvalid)
                 s_axi_arready <= 1;
             else
                 s_axi_arready <= 0;

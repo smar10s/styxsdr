@@ -291,3 +291,71 @@ async def test_high_throughput(dut):
                     f"Mismatch at {i}: expected ({exp_re},{exp_im}), "
                     f"got ({got_re},{got_im})")
     assert mismatches == 0, f"{mismatches} sample mismatches (first 5 logged above)"
+
+
+@cocotb.test()
+async def test_adc_rst_only_no_phantom_samples(dut):
+    """Assert adc_rst ONLY (sys_rst stays low) — no phantom samples emitted.
+
+    Regression test for the reset-domain crossing bug: when adc_rst asserts
+    alone (AD9361 retune), the write-side pointers reset to 0 while the
+    read-side retains stale state. Without the synchronized reset fix, the
+    read side sees stale wr_gray_sync values and emits phantom samples.
+    """
+    await setup(dut)
+
+    # Push 10 samples to fill the FIFO and produce output
+    input_samples = [(i * 100, -(i * 100)) for i in range(10)]
+
+    async def feeder_pre():
+        for re, im in input_samples:
+            dut.valid_in.value = 1
+            dut.re_in.value = to_unsigned_12(re)
+            dut.im_in.value = to_unsigned_12(im)
+            await RisingEdge(dut.adc_clk)
+        dut.valid_in.value = 0
+
+    cocotb.start_soon(feeder_pre())
+
+    # Collect all pre-reset outputs
+    pre_results = await collect_outputs(dut, 10, timeout_cycles=100)
+    assert len(pre_results) == 10, f"Pre-reset: expected 10, got {len(pre_results)}"
+
+    # Wait for FIFO to drain fully
+    for _ in range(20):
+        await RisingEdge(dut.sys_clk)
+
+    # Assert ONLY adc_rst (simulates AD9361 retune — sys_rst stays low)
+    dut.adc_rst.value = 1
+    for _ in range(5):
+        await RisingEdge(dut.adc_clk)
+    for _ in range(10):
+        await RisingEdge(dut.sys_clk)
+
+    # Count any phantom outputs during/after adc_rst assertion
+    phantom_count = 0
+    for _ in range(30):
+        await RisingEdge(dut.sys_clk)
+        await Timer(1, unit="ns")
+        if int(dut.valid_out.value):
+            phantom_count += 1
+
+    # Deassert adc_rst
+    dut.adc_rst.value = 0
+    for _ in range(10):
+        await RisingEdge(dut.adc_clk)
+    for _ in range(10):
+        await RisingEdge(dut.sys_clk)
+
+    assert phantom_count == 0, \
+        f"Phantom samples emitted after adc_rst-only: {phantom_count}"
+
+    # Verify recovery: new samples after reset should arrive correctly
+    test_re, test_im = 777, -333
+    await push_sample(dut, test_re, test_im)
+
+    results = await collect_outputs(dut, 1, timeout_cycles=50)
+    assert len(results) >= 1, "No output after adc_rst-only recovery"
+    re, im = results[0]
+    assert re == test_re, f"Post adc_rst re: expected {test_re}, got {re}"
+    assert im == test_im, f"Post adc_rst im: expected {test_im}, got {im}"

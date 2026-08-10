@@ -28,6 +28,28 @@ module adc_sync #(
 );
 
     // =========================================================
+    // Reset synchronization: adc_rst → sys_clk domain
+    //
+    // The AD9361 IIO driver asserts adc_rst on every retune or
+    // decimation change while sys_rst stays deasserted. Without
+    // coordinating the resets, the FIFO write side resets its
+    // pointers while the read side retains stale pointer state,
+    // causing up to DEPTH-1 phantom or duplicated samples.
+    //
+    // Fix: synchronize adc_rst into sys_clk and use it as the
+    // read-side reset (ORed with the system reset). Both sides
+    // reset together on AD9361 reconfiguration.
+    // =========================================================
+    (* ASYNC_REG = "TRUE" *) reg adc_rst_sync1, adc_rst_sync2;
+
+    always @(posedge sys_clk) begin
+        adc_rst_sync1 <= adc_rst;
+        adc_rst_sync2 <= adc_rst_sync1;
+    end
+
+    wire sys_rst_combined = sys_rst | adc_rst_sync2;
+
+    // =========================================================
     // IQ data CDC via async FIFO (l_clk -> sys_clk)
     // =========================================================
     // FIFO data: {re[11:0], im[11:0]} = 24 bits
@@ -52,7 +74,7 @@ module adc_sync #(
         .full(fifo_full),
 
         .rd_clk(sys_clk),
-        .rd_rst(sys_rst),
+        .rd_rst(sys_rst_combined),
         .rd_en(~fifo_empty),
         .rd_data(fifo_rd_data),
         .empty(fifo_empty)
@@ -61,7 +83,7 @@ module adc_sync #(
     // Read: pop whenever FIFO has data (sys_clk domain)
     // Pipeline register for output stability.
     always @(posedge sys_clk) begin
-        if (sys_rst) begin
+        if (sys_rst_combined) begin
             valid_out <= 0;
             re_out    <= 0;
             im_out    <= 0;

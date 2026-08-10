@@ -194,6 +194,7 @@ int main(int argc, char *argv[]) {
     dma_tx_stop();
     free(tx_real);
     free(tx_imag);
+    styx_disarm_cleanup();
     hal_cleanup();
 
     fprintf(stderr, "Done.\n");

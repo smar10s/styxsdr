@@ -25,12 +25,15 @@
 static volatile sig_atomic_t g_shutdown = 0;
 static void (*g_cleanup_fns[MAX_CLEANUP_FNS])(void);
 static int g_n_cleanup = 0;
+static volatile sig_atomic_t g_disarmed = 0;
 
 static void run_cleanups(void)
 {
     for (int i = 0; i < g_n_cleanup; i++) {
-        if (g_cleanup_fns[i])
+        if (g_cleanup_fns[i]) {
             g_cleanup_fns[i]();
+            g_cleanup_fns[i] = NULL;  /* run at most once */
+        }
     }
 }
 
@@ -44,7 +47,8 @@ static void shutdown_handler(int sig)
 
 static void atexit_handler(void)
 {
-    run_cleanups();
+    if (!g_disarmed)
+        run_cleanups();
 }
 
 void styx_install_shutdown_handler(void)
@@ -70,6 +74,13 @@ void styx_register_tx_cleanup(void (*fn)(void))
 {
     if (g_n_cleanup < MAX_CLEANUP_FNS && fn)
         g_cleanup_fns[g_n_cleanup++] = fn;
+}
+
+void styx_disarm_cleanup(void)
+{
+    g_disarmed = 1;
+    for (int i = 0; i < g_n_cleanup; i++)
+        g_cleanup_fns[i] = NULL;
 }
 
 /* ==========================================================================

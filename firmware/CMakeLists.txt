@@ -12,6 +12,7 @@ add_library(styx_hal STATIC
     src/convert.c
 )
 target_include_directories(styx_hal PUBLIC src/)
+target_link_libraries(styx_hal PUBLIC m)
 
 # ---- On-device tools (ARM only) ----
 if(NOT STYX_HOST_BUILD)
@@ -25,13 +26,13 @@ if(NOT STYX_HOST_BUILD)
 
     # Tools with no lib80211 dependency
     add_executable(hil_inject tools/hil_inject.c)
-    target_link_libraries(hil_inject PRIVATE styx_tool m)
+    target_link_libraries(hil_inject PRIVATE styx_tool)
 
     add_executable(pluto_dma_test tools/platform/pluto_dma_test.c)
-    target_link_libraries(pluto_dma_test PRIVATE styx_tool m)
+    target_link_libraries(pluto_dma_test PRIVATE styx_tool)
 
     add_executable(pluto_stream_test tools/platform/pluto_stream_test.c)
-    target_link_libraries(pluto_stream_test PRIVATE styx_tool m)
+    target_link_libraries(pluto_stream_test PRIVATE styx_tool)
 
     # Tools requiring lib80211
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../extern/lib80211/CMakeLists.txt")
@@ -39,19 +40,19 @@ if(NOT STYX_HOST_BUILD)
                          ${CMAKE_CURRENT_BINARY_DIR}/lib80211)
 
         add_executable(adc_capture tools/adc_capture.c)
-        target_link_libraries(adc_capture PRIVATE styx_tool lib80211 m)
+        target_link_libraries(adc_capture PRIVATE styx_tool lib80211)
 
         add_executable(pluto_sigladder tools/platform/pluto_sigladder.c)
-        target_link_libraries(pluto_sigladder PRIVATE styx_tool lib80211 fftw3f m)
+        target_link_libraries(pluto_sigladder PRIVATE styx_tool lib80211 fftw3f)
 
         add_executable(pluto_tx_beacon tools/platform/pluto_tx_beacon.c)
-        target_link_libraries(pluto_tx_beacon PRIVATE styx_tool lib80211 m)
+        target_link_libraries(pluto_tx_beacon PRIVATE styx_tool lib80211)
 
         add_executable(pluto_loopback tools/platform/pluto_loopback.c)
-        target_link_libraries(pluto_loopback PRIVATE styx_tool lib80211 m)
+        target_link_libraries(pluto_loopback PRIVATE styx_tool lib80211)
 
         add_executable(pluto_burst_loopback tools/platform/pluto_burst_loopback.c)
-        target_link_libraries(pluto_burst_loopback PRIVATE styx_tool lib80211 m)
+        target_link_libraries(pluto_burst_loopback PRIVATE styx_tool lib80211)
     endif()
 endif()
 

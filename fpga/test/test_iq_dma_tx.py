@@ -733,3 +733,89 @@ async def test_stream_stop(dut):
 
     # Stop
     await axi.write(REG_CONTROL, 0x02)
+
+
+@cocotb.test()
+async def test_dac_valid_miss_counter(dut):
+    """Verify DAC_VALID_MISS counter increments when dac_valid is deasserted.
+
+    The counter should:
+    - Reset to 0 on trigger
+    - Increment on every cycle where drain FSM outputs (D_EVEN or D_ODD)
+      but dac_valid is low
+    - Be readable via REG_DAC_VALID_MISS (Gray-code CDC to s_axi_aclk)
+    """
+    REG_DAC_VALID_MISS = 0x1C
+
+    # Custom setup: start with dac_valid=0 so we can verify the counter
+    # increments, then switch to dac_valid=1 and verify it stays 0.
+    cocotb.start_soon(Clock(dut.clk, 50, unit="ns").start())
+    cocotb.start_soon(Clock(dut.s_axi_aclk, 10, unit="ns").start())
+
+    dut.rst.value = 1
+    dut.s_axi_aresetn.value = 0
+    dut.dac_valid.value = 0  # Start DEASSERTED
+
+    dut.s_axi_awaddr.value = 0
+    dut.s_axi_awvalid.value = 0
+    dut.s_axi_wdata.value = 0
+    dut.s_axi_wstrb.value = 0
+    dut.s_axi_wvalid.value = 0
+    dut.s_axi_bready.value = 0
+    dut.s_axi_araddr.value = 0
+    dut.s_axi_arvalid.value = 0
+    dut.s_axi_rready.value = 0
+    dut.m_axi_arready.value = 0
+    dut.m_axi_rdata.value = 0
+    dut.m_axi_rresp.value = 0
+    dut.m_axi_rlast.value = 0
+    dut.m_axi_rvalid.value = 0
+
+    for _ in range(10):
+        await RisingEdge(dut.clk)
+    dut.rst.value = 0
+    dut.s_axi_aresetn.value = 1
+    for _ in range(4):
+        await RisingEdge(dut.clk)
+
+    axi = AxiLiteMaster(dut, prefix="s_axi_", clk=dut.s_axi_aclk)
+    slave = Axi3ReadSlave(dut, prefix="m_axi_", clk=dut.clk)
+    cocotb.start_soon(slave.run())
+
+    # --- Run 1: dac_valid=0, counter should equal tx_count ---
+    tx_count = 64
+    samples = make_samples(tx_count)
+    await configure_and_trigger(axi, slave, samples, tx_count=tx_count)
+
+    done = await wait_tx_done(axi, timeout_cycles=8000)
+    assert done, "tx_done not asserted"
+
+    # Wait for CDC propagation: gray_reg updates 1 clk after last
+    # increment, then needs 3 s_axi_aclk edges to reach readable.
+    for _ in range(10):
+        await RisingEdge(dut.clk)
+    for _ in range(10):
+        await RisingEdge(dut.s_axi_aclk)
+
+    miss_count, _ = await axi.read(REG_DAC_VALID_MISS)
+    assert miss_count == tx_count, \
+        f"DAC_VALID_MISS should be {tx_count} with dac_valid=0, got {miss_count}"
+
+    # --- Run 2: dac_valid=1, counter should be 0 ---
+    dut.dac_valid.value = 1
+    for _ in range(10):
+        await RisingEdge(dut.clk)
+
+    await configure_and_trigger(axi, slave, samples, tx_count=tx_count)
+
+    done = await wait_tx_done(axi, timeout_cycles=8000)
+    assert done, "tx_done not asserted (second run)"
+
+    for _ in range(10):
+        await RisingEdge(dut.clk)
+    for _ in range(10):
+        await RisingEdge(dut.s_axi_aclk)
+
+    miss_count2, _ = await axi.read(REG_DAC_VALID_MISS)
+    assert miss_count2 == 0, \
+        f"DAC_VALID_MISS should be 0 with dac_valid=1, got {miss_count2}"

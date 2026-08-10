@@ -475,6 +475,7 @@ int main(int argc, char *argv[])
 
     if (outfile) fclose(out);
 
+    styx_disarm_cleanup();
     hal_cleanup();
 
     if (!quiet)
