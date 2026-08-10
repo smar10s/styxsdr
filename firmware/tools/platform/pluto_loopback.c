@@ -26,6 +26,7 @@
 #include "dma_tx.h"
 #include "dma_rx.h"
 #include "convert.h"
+#include "styx_tool.h"
 
 #include <lib80211/fft.h>
 #include <lib80211/sync.h>
@@ -97,7 +98,7 @@ static bool payload_matches(const uint8_t *psdu, size_t psdu_len,
 }
 
 /*
- * Two-phase TX + direct DDR capture (same pattern as pluto_sigladder).
+ * Two-phase TX + direct DDR capture (via shared styx_tool library).
  *
  * Returns number of captured samples, or -1 on error.
  * Caller must free *out_real and *out_imag.
@@ -106,99 +107,15 @@ static int tx_and_capture(const float *tx_real, const float *tx_imag,
                           size_t tx_samples, size_t capture_samples,
                           float **out_real, float **out_imag)
 {
-    *out_real = malloc(capture_samples * sizeof(float));
-    *out_imag = malloc(capture_samples * sizeof(float));
-    if (!*out_real || !*out_imag) {
-        free(*out_real); free(*out_imag);
-        *out_real = NULL; *out_imag = NULL;
-        return -1;
-    }
-
-    /* Start RX DMA — ring buffer filling continuously */
-    if (dma_rx_start() != 0) {
-        free(*out_real); free(*out_imag);
-        *out_real = NULL; *out_imag = NULL;
-        return -1;
-    }
-
-    /* Phase 1: Load waveform into DDR and configure DMA (slow) */
-    if (dma_tx_load(tx_real, tx_imag, tx_samples, false) != 0) {
-        dma_rx_stop();
-        free(*out_real); free(*out_imag);
-        *out_real = NULL; *out_imag = NULL;
-        return -1;
-    }
-
-    /* Record t0 — our time reference.  The frame will appear a few
-     * samples after t0 (DAC pipeline latency). */
-    uint32_t t0 = dma_rx_wr_ptr();
-
-    /* Phase 2: Trigger TX — single register write, deterministic */
-    if (dma_tx_trigger() != 0) {
-        dma_rx_stop();
-        free(*out_real); free(*out_imag);
-        *out_real = NULL; *out_imag = NULL;
-        return -1;
-    }
-
-    /* Wait for TX to complete + propagation margin */
-    unsigned int tx_us = (unsigned int)(tx_samples / 20);  /* 20 samples/us */
-    usleep(tx_us + 2000);
-
-    /* Verify enough data has been captured since t0 */
-    uint32_t cur = dma_rx_wr_ptr();
-    uint32_t available = (cur >= t0) ? cur - t0
-                       : (DMA_RX_BUF_SAMPLES - t0) + cur;
-    if (available < (uint32_t)capture_samples) {
-        usleep(5000);
-        cur = dma_rx_wr_ptr();
-        available = (cur >= t0) ? cur - t0
-                  : (DMA_RX_BUF_SAMPLES - t0) + cur;
-    }
-
-    /* Stop both DMAs */
-    dma_tx_stop();
-    dma_rx_stop();
-
-    if (available < (uint32_t)capture_samples) {
-        fprintf(stderr, "tx_and_capture: insufficient data (%u/%zu)\n",
-                available, capture_samples);
-        free(*out_real); free(*out_imag);
-        *out_real = NULL; *out_imag = NULL;
-        return -1;
-    }
-
-    /* Read directly from DDR ring buffer starting at t0 */
-    volatile uint32_t *rx_buf = hal_ddr_rx_buf();
-    uint32_t read_ptr = t0;
-    if (read_ptr + (uint32_t)capture_samples <= DMA_RX_BUF_SAMPLES) {
-        convert_rx_to_float(&rx_buf[read_ptr], capture_samples,
-                            *out_real, *out_imag);
-    } else {
-        size_t first = DMA_RX_BUF_SAMPLES - read_ptr;
-        size_t second = capture_samples - first;
-        convert_rx_to_float(&rx_buf[read_ptr], first,
-                            *out_real, *out_imag);
-        convert_rx_to_float(&rx_buf[0], second,
-                            &(*out_real)[first], &(*out_imag)[first]);
-    }
-
-    /* Remove residual DC offset (same as sigladder) */
-    {
-        double sum_re = 0.0, sum_im = 0.0;
-        for (size_t i = 0; i < capture_samples; i++) {
-            sum_re += (*out_real)[i];
-            sum_im += (*out_imag)[i];
-        }
-        float dc_re = (float)(sum_re / (double)capture_samples);
-        float dc_im = (float)(sum_im / (double)capture_samples);
-        for (size_t i = 0; i < capture_samples; i++) {
-            (*out_real)[i] -= dc_re;
-            (*out_imag)[i] -= dc_im;
-        }
-    }
-
-    return (int)capture_samples;
+    styx_capture_cfg_t cfg = {
+        .tx_re = tx_real,
+        .tx_im = tx_imag,
+        .tx_samples = tx_samples,
+        .capture_samples = capture_samples,
+        .extra_wait_us = 2000,
+        .remove_dc = true,
+    };
+    return styx_tx_and_capture(&cfg, out_real, out_imag);
 }
 
 typedef struct {
@@ -359,18 +276,27 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    /* Configure radio (both TX and RX) */
-    hal_ad9361_set_sample_rate(SAMPLE_RATE_HZ);
-    hal_ad9361_set_tx_lo(freq);
-    hal_ad9361_set_rx_lo(freq);
-    hal_ad9361_set_tx_bandwidth(BANDWIDTH_HZ);
-    hal_ad9361_set_rx_bandwidth(BANDWIDTH_HZ);
-    hal_ad9361_set_rx_gain_mode("manual");
-    hal_ad9361_set_rx_gain(rx_gain);
-    hal_ad9361_set_tx_attenuation(tx_atten);
+    /* Install signal handlers + TX cleanup */
+    styx_install_shutdown_handler();
+    styx_register_tx_cleanup(dma_tx_stop);
 
-    /* Allow PLL lock and ADC settling */
-    usleep(100000);
+    /* Configure radio (both TX and RX) */
+    styx_rf_config_t rf = {
+        .sample_rate_hz = SAMPLE_RATE_HZ,
+        .tx_lo_hz = freq,
+        .rx_lo_hz = freq,
+        .tx_bw_hz = BANDWIDTH_HZ,
+        .rx_bw_hz = BANDWIDTH_HZ,
+        .tx_atten_db = tx_atten,
+        .rx_gain_mode = "manual",
+        .rx_gain_db = rx_gain,
+        .settle_us = 100000,
+    };
+    if (styx_rf_configure(&rf) != 0) {
+        fprintf(stderr, "ERROR: RF configuration failed\n");
+        hal_cleanup();
+        return 1;
+    }
 
     fprintf(stderr, "Loopback test: freq=%llu MHz, atten=%.1f dB, gain=%.1f dB, trials=%d, payload=%d bytes\n",
             (unsigned long long)(freq / 1000000ULL), tx_atten, rx_gain, n_trials, payload_len);

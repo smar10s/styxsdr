@@ -24,11 +24,11 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <time.h>
-#include <signal.h>
 
 #include "hal.h"
 #include "dma_tx.h"
 #include "dma_rx.h"
+#include "styx_tool.h"
 
 /* -------------------------------------------------------------------------- */
 
@@ -36,23 +36,6 @@
 
 static int tests_run = 0;
 static int tests_passed = 0;
-
-/* atexit callback: ensure TX DMA is stopped if process is interrupted.
- * Guard: only act if hal hasn't been cleaned up yet (normal exit path
- * calls hal_cleanup() before returning). */
-static bool g_hal_active = false;
-
-static void atexit_tx_stop(void) {
-    if (g_hal_active)
-        dma_tx_stop();
-}
-
-static void shutdown_handler(int sig) {
-    (void)sig;
-    if (g_hal_active)
-        dma_tx_stop();
-    _exit(130);  /* 128 + SIGINT */
-}
 
 static uint64_t time_ms(void)
 {
@@ -424,15 +407,13 @@ int main(void)
 {
     fprintf(stderr, "pluto_dma_test — DMA start/stop/restart validation\n");
 
-    signal(SIGINT, shutdown_handler);
-    signal(SIGTERM, shutdown_handler);
-    atexit(atexit_tx_stop);
+    styx_install_shutdown_handler();
+    styx_register_tx_cleanup(dma_tx_stop);
 
     if (hal_init() != 0) {
         fprintf(stderr, "ERROR: hal_init failed\n");
         return 1;
     }
-    g_hal_active = true;
 
     /* Run all tests */
     test_rx_start_stop();
@@ -443,7 +424,6 @@ int main(void)
     test_stream_restart();
     test_large_buffer();
 
-    g_hal_active = false;
     hal_cleanup();
 
     /* Summary */

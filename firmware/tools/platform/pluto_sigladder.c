@@ -35,12 +35,12 @@
 #include <unistd.h>
 #include <stdbool.h>
 #include <stdint.h>
-#include <signal.h>
 
 #include "hal.h"
 #include "dma_tx.h"
 #include "dma_rx.h"
 #include "convert.h"
+#include "styx_tool.h"
 
 #include <fftw3.h>
 
@@ -67,20 +67,6 @@
  * Globals
  * -------------------------------------------------------------------------- */
 
-static volatile sig_atomic_t g_shutdown = 0;
-static bool g_hal_active = false;
-
-static void shutdown_handler(int sig) {
-    (void)sig;
-    g_shutdown = 1;
-}
-
-/* atexit callback: ensure TX is stopped if process exits uncleanly */
-static void atexit_tx_stop(void) {
-    if (g_hal_active)
-        dma_tx_stop();
-}
-
 static int g_max_level = MAX_LEVELS;
 static uint64_t g_freq_hz = 3456000000ULL;  /* 3456 MHz — amateur 9cm, no WiFi/BT/cellular */
 static double g_tx_atten = 10.0;
@@ -103,20 +89,19 @@ static level_result results[MAX_LEVELS];
  * Helpers
  * -------------------------------------------------------------------------- */
 
-static void configure_radio(void) {
-    hal_ad9361_set_sample_rate(SAMPLE_RATE_HZ);
-    hal_ad9361_set_tx_lo(g_freq_hz);
-    hal_ad9361_set_rx_lo(g_freq_hz);
-    hal_ad9361_set_tx_bandwidth(BANDWIDTH_HZ);
-    hal_ad9361_set_rx_bandwidth(BANDWIDTH_HZ);
-    hal_ad9361_set_rx_gain_mode("manual");
-    hal_ad9361_set_rx_gain(g_rx_gain);
-    hal_ad9361_set_tx_attenuation(g_tx_atten);
-
-    /* Allow PLL lock and ADC settling after configuration change.
-     * AD9361 auto-calibration mode runs TX quad and DC offset
-     * calibration when frequency/bandwidth are written. */
-    usleep(100000);  /* 100 ms for settling + auto-cal */
+static int configure_radio(void) {
+    styx_rf_config_t rf = {
+        .sample_rate_hz = SAMPLE_RATE_HZ,
+        .tx_lo_hz = g_freq_hz,
+        .rx_lo_hz = g_freq_hz,
+        .tx_bw_hz = BANDWIDTH_HZ,
+        .rx_bw_hz = BANDWIDTH_HZ,
+        .tx_atten_db = g_tx_atten,
+        .rx_gain_mode = "manual",
+        .rx_gain_db = g_rx_gain,
+        .settle_us = 100000,
+    };
+    return styx_rf_configure(&rf);
 }
 
 /*
@@ -994,25 +979,27 @@ int main(int argc, char *argv[]) {
             g_cyclic ? "cyclic" : "one-shot");
 
     /* Initialize */
-    signal(SIGINT, shutdown_handler);
-    signal(SIGTERM, shutdown_handler);
-    atexit(atexit_tx_stop);
+    styx_install_shutdown_handler();
+    styx_register_tx_cleanup(dma_tx_stop);
 
     if (hal_init() != 0) {
         fprintf(stderr, "ERROR: hal_init failed\n");
         return 1;
     }
-    g_hal_active = true;
 
     g_fft_plan = lib80211_fft_plan_create();
     if (!g_fft_plan) {
         fprintf(stderr, "ERROR: fft_plan_create failed\n");
-        g_hal_active = false;
         hal_cleanup();
         return 1;
     }
 
-    configure_radio();
+    if (configure_radio() != 0) {
+        fprintf(stderr, "ERROR: RF configuration failed\n");
+        lib80211_fft_plan_destroy(g_fft_plan);
+        hal_cleanup();
+        return 1;
+    }
 
     /* Warm-up: TX a short silence burst to flush DAC pipeline and settle
      * the AD9361 DC offset tracking loop.  Without this, the first 1-2
@@ -1053,7 +1040,6 @@ int main(int argc, char *argv[]) {
                100.0 * pass / g_repeat);
 
         lib80211_fft_plan_destroy(g_fft_plan);
-        g_hal_active = false;
         hal_cleanup();
         return (pass == g_repeat) ? 0 : 1;
     }
@@ -1102,7 +1088,6 @@ int main(int argc, char *argv[]) {
     }
 
     lib80211_fft_plan_destroy(g_fft_plan);
-    g_hal_active = false;
     hal_cleanup();
 
     /* JSON output */
