@@ -424,6 +424,7 @@ int main(void)
     test_stream_restart();
     test_large_buffer();
 
+    styx_disarm_cleanup();
     hal_cleanup();
 
     /* Summary */

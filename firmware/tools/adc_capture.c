@@ -396,6 +396,7 @@ int main(int argc, char *argv[])
     if (verbose)
         fprintf(stderr, "  Read %u samples from DDR\n", actual_count);
 
+    styx_disarm_cleanup();
     hal_cleanup();
 
     /* Signal-level diagnostics — always printed (key diagnostic output) */

@@ -14,6 +14,12 @@ set_clock_groups -asynchronous \
 # clk_fpga_0 (sys_cpu_clk, ~100 MHz). Gray-code pointer synchronizers
 # and stable-before-read FIFO memory don't need single-cycle timing.
 
+# adc_rst CDC: adc_rst (rx_clk domain) -> adc_rst_sync1/2 (clk_fpga_0).
+# 2-stage synchronizer for coordinated FIFO reset on AD9361 retune.
+set_false_path -from [get_cells -hierarchical -filter {NAME =~ *adc_cdc/inst/adc_rst_sync1_reg*}] \
+               -to   [get_cells -hierarchical -filter {NAME =~ *adc_cdc/inst/adc_rst_sync2_reg*}]
+set_false_path -to   [get_cells -hierarchical -filter {NAME =~ *adc_cdc/inst/adc_rst_sync1_reg*}]
+
 # Gray-code pointer synchronizers
 set_false_path -from [get_cells -hierarchical -filter {NAME =~ *u_iq_fifo/wr_gray_reg[*]}] \
                -to   [get_cells -hierarchical -filter {NAME =~ *u_iq_fifo/wr_gray_sync1_reg[*]}]
@@ -52,9 +58,11 @@ set_false_path -from [get_cells -hierarchical -filter {NAME =~ *iq_dma_tx_0/inst
                -to   [get_cells -hierarchical -filter {NAME =~ *iq_dma_tx_0/inst/s_axi_rdata*}]
 
 # ---- iq_dma_tx WR_PTR CDC (s_axi_aclk -> l_clk) ----
-# Gray-code synchronizer: wr_ptr_gray_reg -> wr_ptr_gray_sync1/2
-set_false_path -from [get_cells -hierarchical -filter {NAME =~ *iq_dma_tx_0/inst/wr_ptr_gray_reg*}] \
-               -to   [get_cells -hierarchical -filter {NAME =~ *iq_dma_tx_0/inst/wr_ptr_gray_sync1*}]
+# Multi-bit 2-stage synchronizer: reg_wr_ptr_axi -> wr_ptr_sync1/2.
+# Not gray-coded (stale values are conservative — fill FSM stalls, never
+# over-reads).  ASYNC_REG on wr_ptr_sync1/2 handles metastability.
+set_false_path -from [get_cells -hierarchical -filter {NAME =~ *iq_dma_tx_0/inst/reg_wr_ptr_axi_reg[*]}] \
+               -to   [get_cells -hierarchical -filter {NAME =~ *iq_dma_tx_0/inst/wr_ptr_sync1_reg[*]}]
 
 # ---- iq_dma_tx RD_PTR CDC (l_clk -> s_axi_aclk) ----
 # Gray-code synchronizer: rd_ptr_gray_reg -> rd_ptr_gray_sync1/2

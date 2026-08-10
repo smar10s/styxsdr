@@ -6,6 +6,11 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#include <math.h>
+
+#ifdef __ARM_NEON
+#include <arm_neon.h>
+#endif
 
 /* Ensure all prior stores (DDR waveform data) are visible to the
  * interconnect before triggering DMA.  On Cortex-A9, volatile alone
@@ -264,11 +269,50 @@ static int stream_feed(const float *in_real, const float *in_imag,
     size_t second = n_samples - first;
 
     if (auto_scale) {
-        convert_float_to_tx_auto(in_real, in_imag, first,
-                                 (volatile uint32_t *)&tx_buf[cursor]);
+        /* Find peak over the ENTIRE chunk so both halves of a wrapping
+         * write use the same scale factor.  Without this, each half gets
+         * an independent peak search and normalization, producing a 20 dB
+         * step at the wrap boundary (issue #4).
+         *
+         * NEON path: vabs + vmax, 4 samples/iteration (~4x scalar). */
+        float peak = 0.0f;
+#ifdef __ARM_NEON
+        float32x4_t vpeak = vdupq_n_f32(0.0f);
+        size_t i = 0;
+        size_t n4 = n_samples & ~(size_t)3;
+        for (; i < n4; i += 4) {
+            float32x4_t vr = vld1q_f32(&in_real[i]);
+            float32x4_t vi = vld1q_f32(&in_imag[i]);
+            float32x4_t ar = vabsq_f32(vr);
+            float32x4_t ai = vabsq_f32(vi);
+            vpeak = vmaxq_f32(vpeak, vmaxq_f32(ar, ai));
+        }
+        /* Horizontal max of the 4 lanes */
+        float32x2_t vmax2 = vpmax_f32(vget_low_f32(vpeak), vget_high_f32(vpeak));
+        vmax2 = vpmax_f32(vmax2, vmax2);
+        peak = vget_lane_f32(vmax2, 0);
+        /* Scalar tail */
+        for (; i < n_samples; i++) {
+            float ar = fabsf(in_real[i]);
+            float ai = fabsf(in_imag[i]);
+            if (ar > peak) peak = ar;
+            if (ai > peak) peak = ai;
+        }
+#else
+        for (size_t i = 0; i < n_samples; i++) {
+            float ar = fabsf(in_real[i]);
+            float ai = fabsf(in_imag[i]);
+            if (ar > peak) peak = ar;
+            if (ai > peak) peak = ai;
+        }
+#endif
+        float scale = (peak > 0.0f) ? 2047.0f / peak : 2047.0f;
+
+        convert_float_to_tx(in_real, in_imag, first, scale,
+                            (volatile uint32_t *)&tx_buf[cursor]);
         if (second)
-            convert_float_to_tx_auto(&in_real[first], &in_imag[first], second,
-                                     (volatile uint32_t *)&tx_buf[0]);
+            convert_float_to_tx(&in_real[first], &in_imag[first], second,
+                                scale, (volatile uint32_t *)&tx_buf[0]);
     } else {
         convert_float_to_tx(in_real, in_imag, first, peak_scale,
                             (volatile uint32_t *)&tx_buf[cursor]);

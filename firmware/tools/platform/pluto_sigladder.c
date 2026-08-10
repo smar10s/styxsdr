@@ -1088,6 +1088,7 @@ int main(int argc, char *argv[]) {
     }
 
     lib80211_fft_plan_destroy(g_fft_plan);
+    styx_disarm_cleanup();
     hal_cleanup();
 
     /* JSON output */

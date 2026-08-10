@@ -276,7 +276,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    /* Install signal handlers + TX cleanup */
+    /* Install signal handlers + TX cleanup for abnormal exit */
     styx_install_shutdown_handler();
     styx_register_tx_cleanup(dma_tx_stop);
 
@@ -360,6 +360,7 @@ int main(int argc, char *argv[]) {
     }
 
     lib80211_fft_plan_destroy(plan);
+    styx_disarm_cleanup();
     hal_cleanup();
 
     /* Output JSON */
