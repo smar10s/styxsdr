@@ -168,4 +168,9 @@ ifndef REMOTE
 		echo "Run: git submodule update --init fpga/extern/adi-hdl"; \
 		exit 1; \
 	fi
+	@if ! find "$(ADI_HDL_DIR)/library" -name component.xml -print -quit 2>/dev/null | grep -q .; then \
+		echo "ERROR: ADI HDL IP library not built (no component.xml found)."; \
+		echo "Run: make -C $(ADI_HDL_DIR)/library"; \
+		exit 1; \
+	fi
 endif
