@@ -27,7 +27,7 @@ namespace eval styx {
 # styx::parse_args — Parse command-line arguments for build.tcl drives
 #
 # Returns: dict with keys: project_dir, rtl_dir, adi_hdl_dir, output_dir,
-#          place_strategy, ooc_modules, incremental, skip_project
+#          place_strategy, opt_directive, ooc_modules, incremental, skip_project
 # ============================================================================
 proc styx::parse_args {argv} {
     set opts [dict create \
@@ -36,6 +36,7 @@ proc styx::parse_args {argv} {
         adi_hdl_dir     "" \
         output_dir      "" \
         place_strategy  "Explore" \
+        opt_directive   "" \
         ooc_modules     {} \
         incremental     "" \
         skip_project    0 \
@@ -49,6 +50,7 @@ proc styx::parse_args {argv} {
             -adi_hdl_dir    { dict set opts adi_hdl_dir [lindex $argv [incr i]] }
             -output_dir     { dict set opts output_dir [lindex $argv [incr i]] }
             -place_strategy { dict set opts place_strategy [lindex $argv [incr i]] }
+            -opt_directive  { dict set opts opt_directive [lindex $argv [incr i]] }
             -ooc_modules    { dict set opts ooc_modules [lindex $argv [incr i]] }
             -incremental    { dict set opts incremental [lindex $argv [incr i]] }
             -skip_project   { dict set opts skip_project 1 }
@@ -291,14 +293,31 @@ proc styx::global_synth {args} {
 # styx::implement — Place & route with named strategy
 #
 # Arguments:
-#   place_strategy — Vivado placement directive name (e.g., "Explore")
+#   place_strategy     — Vivado placement directive name (e.g., "Explore")
+#   -opt_directive NAME — opt_design directive (default: ExploreWithRemap)
+#   -phys_opt NAME      — phys_opt_design directive (default: AggressiveExplore)
+#   -route NAME         — route_design directive (default: AggressiveExplore)
 #
-# Also configures:
-#   opt_design:      ExploreWithRemap
-#   phys_opt_design: AggressiveExplore (enabled)
-#   route_design:    AggressiveExplore
+# The defaults preserve styx's historical recipe. Consumers with tighter
+# fit margins (e.g., deimos) can override, most commonly
+# -opt_directive ExploreArea.
 # ============================================================================
-proc styx::implement {place_strategy} {
+proc styx::implement {place_strategy args} {
+    set opt_directive "ExploreWithRemap"
+    set phys_opt      "AggressiveExplore"
+    set route         "AggressiveExplore"
+
+    # Parse named arguments
+    for {set i 0} {$i < [llength $args]} {incr i} {
+        set arg [lindex $args $i]
+        switch -- $arg {
+            -opt_directive { set opt_directive [lindex $args [incr i]] }
+            -phys_opt      { set phys_opt [lindex $args [incr i]] }
+            -route         { set route [lindex $args [incr i]] }
+            default        { puts "WARNING: unknown argument to styx::implement: $arg" }
+        }
+    }
+
     # Validate strategy name
     set valid_strategies [list \
         Explore Default AltSpreadLogic_high EarlyBlockPlacement \
@@ -312,12 +331,12 @@ proc styx::implement {place_strategy} {
     }
 
     set_property STEPS.PLACE_DESIGN.ARGS.DIRECTIVE $place_strategy [get_runs impl_1]
-    set_property STEPS.OPT_DESIGN.ARGS.DIRECTIVE ExploreWithRemap [get_runs impl_1]
+    set_property STEPS.OPT_DESIGN.ARGS.DIRECTIVE $opt_directive [get_runs impl_1]
     set_property STEPS.PHYS_OPT_DESIGN.IS_ENABLED true [get_runs impl_1]
-    set_property STEPS.PHYS_OPT_DESIGN.ARGS.DIRECTIVE AggressiveExplore [get_runs impl_1]
-    set_property STEPS.ROUTE_DESIGN.ARGS.DIRECTIVE AggressiveExplore [get_runs impl_1]
+    set_property STEPS.PHYS_OPT_DESIGN.ARGS.DIRECTIVE $phys_opt [get_runs impl_1]
+    set_property STEPS.ROUTE_DESIGN.ARGS.DIRECTIVE $route [get_runs impl_1]
 
-    puts "IMPL: placement=$place_strategy"
+    puts "IMPL: placement=$place_strategy opt=$opt_directive phys_opt=$phys_opt route=$route"
     launch_runs impl_1 -to_step write_bitstream -jobs [get_param general.maxThreads]
     wait_on_run impl_1
 
