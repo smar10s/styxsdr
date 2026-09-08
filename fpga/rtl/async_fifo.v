@@ -47,7 +47,8 @@ module async_fifo #(
 
     // --- Write pointer (wr_clk domain, binary + gray) ---
     reg [PTR_W-1:0] wr_bin;
-    wire [PTR_W-1:0] wr_bin_next = wr_bin + (wr_en & ~full);
+    wire [PTR_W-1:0] wr_bin_next = wr_bin +
+        ((wr_en && !full) ? {{(PTR_W-1){1'b0}}, 1'b1} : {PTR_W{1'b0}});
     wire [PTR_W-1:0] wr_gray_next = wr_bin_next ^ (wr_bin_next >> 1);
     reg [PTR_W-1:0] wr_gray;
 
@@ -74,7 +75,8 @@ module async_fifo #(
 
     // --- Read pointer (rd_clk domain, binary + gray) ---
     reg [PTR_W-1:0] rd_bin;
-    wire [PTR_W-1:0] rd_bin_next = rd_bin + (rd_en & ~empty);
+    wire [PTR_W-1:0] rd_bin_next = rd_bin +
+        ((rd_en && !empty) ? {{(PTR_W-1){1'b0}}, 1'b1} : {PTR_W{1'b0}});
     wire [PTR_W-1:0] rd_gray_next = rd_bin_next ^ (rd_bin_next >> 1);
     reg [PTR_W-1:0] rd_gray;
 

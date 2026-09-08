@@ -107,10 +107,13 @@ echo ""
 
 # ---- Step 3: DMA register-level validation ----
 echo "3. DMA register-level validation"
-DMA_JSON=$($SSH "pluto_dma_test" 2>/dev/null || echo '{"passed":0}')
-DMA_PASSED=$(echo "$DMA_JSON" | grep -o '"passed":[0-9]*' | grep -o '[0-9]*')
+# Keep the output even when the tool reports failures, otherwise the
+# fallback JSON is appended to it and both counts get parsed.
+DMA_JSON=$($SSH "pluto_dma_test" 2>/dev/null)
+[ -z "$DMA_JSON" ] && DMA_JSON='{"passed":0,"total":7}'
+DMA_PASSED=$(echo "$DMA_JSON" | grep -o '"passed":[0-9]*' | grep -o '[0-9]*' | tail -1)
 DMA_PASSED=${DMA_PASSED:-0}
-DMA_TOTAL=$(echo "$DMA_JSON" | grep -o '"total":[0-9]*' | grep -o '[0-9]*')
+DMA_TOTAL=$(echo "$DMA_JSON" | grep -o '"total":[0-9]*' | grep -o '[0-9]*' | tail -1)
 DMA_TOTAL=${DMA_TOTAL:-7}
 if [ "$DMA_PASSED" -eq "$DMA_TOTAL" ]; then
     result "PASS" "DMA test: ${DMA_PASSED}/${DMA_TOTAL} register tests pass"

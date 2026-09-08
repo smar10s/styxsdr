@@ -126,8 +126,19 @@ module hil_ctrl #(
 );
 
     // AXI3 constants
+    localparam [3:0] BURST_ARLEN = BURST_LEN[3:0] - 4'd1;
+
+    initial begin
+        // BURST_ARLEN is a 4-bit field, so a longer burst would wrap
+        // silently. AXI3 caps a burst at 16 beats anyway.
+        if (BURST_LEN < 1 || BURST_LEN > 16) begin
+            $error("BURST_LEN (%0d) must be 1..16 (AXI3 limit, 4-bit arlen)",
+                   BURST_LEN);
+        end
+    end
+
     assign m_axi_arid    = 4'd0;
-    assign m_axi_arlen   = BURST_LEN - 1;
+    assign m_axi_arlen   = BURST_ARLEN;
     assign m_axi_arsize  = 3'b011;       // 8 bytes/beat
     assign m_axi_arburst = 2'b01;        // INCR
     assign m_axi_arlock  = 2'b00;

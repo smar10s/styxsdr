@@ -117,7 +117,11 @@ module tb_iq_dma_loopback #(
             assign rx_re = loop_re[15:4];
             assign rx_im = loop_im[15:4];
         end else begin : g_decimate
-            reg [$clog2(VALID_RATIO)-1:0] ratio_cnt;
+            localparam integer RATIO_CNT_W = $clog2(VALID_RATIO);
+            localparam [RATIO_CNT_W-1:0] VALID_RATIO_LAST =
+                VALID_RATIO[RATIO_CNT_W-1:0] -
+                {{(RATIO_CNT_W-1){1'b0}}, 1'b1};
+            reg [RATIO_CNT_W-1:0] ratio_cnt;
             reg         rx_valid_r;
             reg [11:0]  rx_re_r, rx_im_r;
 
@@ -133,7 +137,7 @@ module tb_iq_dma_loopback #(
                             rx_re_r <= loop_re[15:4];
                             rx_im_r <= loop_im[15:4];
                         end
-                        ratio_cnt <= (ratio_cnt == VALID_RATIO - 1)
+                        ratio_cnt <= (ratio_cnt == VALID_RATIO_LAST)
                                      ? 0 : ratio_cnt + 1;
                     end else begin
                         ratio_cnt <= 0;

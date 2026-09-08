@@ -176,11 +176,37 @@ module iq_dma_tx #(
     // =========================================================
     // AXI3 read constants
     // =========================================================
-    assign m_axi_arlen   = BURST_LEN - 1;
+    localparam [3:0] BURST_ARLEN = BURST_LEN[3:0] - 4'd1;
+
+    assign m_axi_arlen   = BURST_ARLEN;
     assign m_axi_arsize  = 3'b011;       // 8 bytes
     assign m_axi_arburst = 2'b01;        // INCR
 
     localparam SAMPLES_PER_BURST = BURST_LEN * 2;  // 32
+
+    initial begin
+        // BURST_ARLEN is a 4-bit field, so a longer burst would wrap
+        // silently. AXI3 caps a burst at 16 beats anyway.
+        if (BURST_LEN < 1 || BURST_LEN > 16) begin
+            $error("BURST_LEN (%0d) must be 1..16 (AXI3 limit, 4-bit arlen)",
+                   BURST_LEN);
+        end
+        // The ring-buffer wrap uses an AND mask, which needs a power of two.
+        if ((BUF_SIZE_SAMPLES & (BUF_SIZE_SAMPLES - 1)) != 0) begin
+            $error("BUF_SIZE_SAMPLES (%0d) must be a power of two (AND mask wrap)",
+                   BUF_SIZE_SAMPLES);
+        end
+        if (BUF_SIZE_SAMPLES % SAMPLES_PER_BURST != 0) begin
+            $error("BUF_SIZE_SAMPLES (%0d) must be a multiple of SAMPLES_PER_BURST (%0d)",
+                   BUF_SIZE_SAMPLES, SAMPLES_PER_BURST);
+        end
+        // The sample index is shifted left by two to form a byte address,
+        // so the top two bits must be free.
+        if (BUF_SIZE_SAMPLES > (1 << 30)) begin
+            $error("BUF_SIZE_SAMPLES (%0d) must not exceed 2**30 (byte-address shift)",
+                   BUF_SIZE_SAMPLES);
+        end
+    end
 
     // =========================================================
     // Register map
@@ -660,7 +686,7 @@ module iq_dma_tx #(
                             (seg_ready[fill_seg + 4'd1] || drain_clear[fill_seg + 4'd1])) begin
                             f_state <= F_WAIT;
                         end else begin
-                            m_axi_araddr   <= lcl_ddr_base + {fill_ptr_next, 2'b00};
+                            m_axi_araddr   <= lcl_ddr_base + {fill_ptr_next[29:0], 2'b00};
                             m_axi_arvalid  <= 1;
                             fill_beat      <= 0;
                             f_state        <= F_RD_ADDR;
@@ -695,7 +721,7 @@ module iq_dma_tx #(
                         if (lcl_stream && fill_ptr >= lcl_wr_ptr) begin
                             // Stall: caught up to write pointer
                         end else begin
-                            m_axi_araddr   <= lcl_ddr_base + {fill_ptr, 2'b00};
+                            m_axi_araddr   <= lcl_ddr_base + {fill_ptr[29:0], 2'b00};
                             m_axi_arvalid  <= 1;
                             fill_beat      <= 0;
                             f_state        <= F_RD_ADDR;

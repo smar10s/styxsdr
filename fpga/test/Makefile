@@ -21,8 +21,7 @@ RTL := $(shell pwd)/../rtl
 # Verilator flags
 ifeq ($(SIM),verilator)
 EXTRA_ARGS += --no-timing +define+SIM \
-              -Wno-WIDTHTRUNC -Wno-WIDTHEXPAND -Wno-ASCRANGE \
-              -Wno-CASEINCOMPLETE -Wno-UNOPTFLAT -Wno-CMPCONST \
+              -Wno-ASCRANGE -Wno-CASEINCOMPLETE -Wno-UNOPTFLAT \
               -Wno-PINMISSING -Wno-MULTIDRIVEN
 ifeq ($(VERILATOR_COVERAGE),1)
 EXTRA_ARGS += --coverage
@@ -126,6 +125,14 @@ LINT_SRCS = $(wildcard $(RTL)/*.v)
 LINT_SUPPRESS = -Wno-DECLFILENAME -Wno-UNUSED -Wno-MULTITOP \
                 -Wno-PINCONNECTEMPTY -Wno-ASCRANGE -Wno-TIMESCALEMOD
 
+LINT_STRICT_ERRORS = -Werror-CASEINCOMPLETE -Werror-UNOPTFLAT \
+                     -Werror-WIDTHTRUNC -Werror-WIDTHEXPAND -Werror-CMPCONST
+
+# The loopback testbench is linted separately: it needs an explicit top
+# module, and its decimator only elaborates when VALID_RATIO is above one.
+TB_LINT_SRCS = $(CURDIR)/tb_iq_dma_loopback.v \
+               $(RTL)/iq_dma_tx.v $(RTL)/iq_dma_rx.v
+
 .PHONY: lint
 lint:
 	@echo "=== Verilator lint (advisory) ==="
@@ -133,13 +140,26 @@ lint:
 	@echo "LINT PASSED (advisory)"
 
 .PHONY: lint-strict
-lint-strict:
+lint-strict: lint-strict-tb
 	@echo "=== Verilator lint (strict gate) ==="
 	verilator --lint-only --Wall $(LINT_SUPPRESS) \
-		-Wno-WIDTHTRUNC -Wno-WIDTHEXPAND -Wno-CMPCONST \
-		-Werror-CASEINCOMPLETE -Werror-UNOPTFLAT \
+		$(LINT_STRICT_ERRORS) \
 		$(LINT_SRCS)
 	@echo "LINT PASSED (strict)"
+
+# Lint the testbench at both decimator settings so neither generate
+# branch can regress unnoticed.
+.PHONY: lint-strict-tb
+lint-strict-tb:
+	@echo "=== Verilator lint (strict gate, testbench) ==="
+	@for ratio in 1 5; do \
+		echo "--- tb_iq_dma_loopback VALID_RATIO=$$ratio ---"; \
+		verilator --lint-only --Wall $(LINT_SUPPRESS) \
+			$(LINT_STRICT_ERRORS) \
+			+define+SIM --top-module tb_iq_dma_loopback \
+			$(TB_LINT_SRCS) -GVALID_RATIO=$$ratio || exit 1; \
+	done
+	@echo "LINT PASSED (strict, testbench)"
 
 # ---- Waveform generation ----
 

@@ -157,6 +157,9 @@ clean: ## Remove FPGA build artifacts
 		$(PROJECT_DIR)/pluto.runs $(PROJECT_DIR)/pluto.srcs \
 		$(PROJECT_DIR)/pluto.cache $(PROJECT_DIR)/pluto.hw \
 		$(PROJECT_DIR)/pluto.ip_user_files $(PROJECT_DIR)/pluto.sim
+	rm -rf $(SIM_DIR)/sim_build_* \
+		$(SIM_DIR)/results.xml $(SIM_DIR)/dump.vcd \
+		$(SIM_DIR)/waves
 	@echo "Cleaned."
 
 # ---- Dependency checks ----

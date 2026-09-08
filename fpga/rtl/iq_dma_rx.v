@@ -150,7 +150,9 @@ module iq_dma_rx #(
     // =========================================================
     // AXI3 constants — 64-bit, 2 samples packed per beat
     // =========================================================
-    assign m_axi_awlen   = BURST_LEN - 1;          // 15 = 16 beats
+    localparam [3:0] BURST_LAST = BURST_LEN[3:0] - 4'd1;
+
+    assign m_axi_awlen   = BURST_LAST;              // 15 = 16 beats
     assign m_axi_awsize  = 3'b011;                  // 8 bytes per beat
     assign m_axi_awburst = 2'b01;                   // INCR
     assign m_axi_wstrb   = 8'hFF;                   // all bytes valid
@@ -167,6 +169,18 @@ module iq_dma_rx #(
         if (DDR_BUF_SAMPLES % SAMPLES_PER_BURST != 0) begin
             $error("DDR_BUF_SAMPLES (%0d) must be a multiple of SAMPLES_PER_BURST (%0d)",
                    DDR_BUF_SAMPLES, SAMPLES_PER_BURST);
+        end
+        // BURST_LAST is a 4-bit field, so a longer burst would wrap silently.
+        // AXI3 caps a burst at 16 beats anyway.
+        if (BURST_LEN < 1 || BURST_LEN > 16) begin
+            $error("BURST_LEN (%0d) must be 1..16 (AXI3 limit, 4-bit awlen)",
+                   BURST_LEN);
+        end
+        // The write pointer is 25 bits wide and is zero-extended when it
+        // forms the DDR byte address.
+        if (DDR_BUF_SAMPLES > (1 << 25)) begin
+            $error("DDR_BUF_SAMPLES (%0d) must not exceed 2**25 (wr_ptr_r width)",
+                   DDR_BUF_SAMPLES);
         end
     end
 
@@ -393,7 +407,7 @@ module iq_dma_rx #(
                     if (burst_pending && base_configured) begin
                         burst_sel     <= ~buf_sel;
                         burst_wr_ptr  <= wr_ptr_r;
-                        m_axi_awaddr  <= reg_ddr_base + {wr_ptr_r, 2'b00};
+                        m_axi_awaddr  <= reg_ddr_base + {5'b0, wr_ptr_r, 2'b00};
                         m_axi_awvalid <= 1;
                         beat_cnt      <= 0;
                         // Start BRAM read for beat 0
@@ -435,7 +449,7 @@ module iq_dma_rx #(
                         beat_cnt <= beat_cnt + 1;
                         m_axi_wvalid <= 0;  // deassert until S_NEXT loads next beat
 
-                        if (beat_cnt == BURST_LEN - 1) begin
+                        if (beat_cnt == BURST_LAST) begin
                             // Last beat accepted
                             m_axi_wlast  <= 0;
                             m_axi_bready <= 1;
@@ -456,7 +470,7 @@ module iq_dma_rx #(
                     // in the previous S_NEXT for subsequent beats).
                     m_axi_wdata  <= mem_rd_data;
                     m_axi_wvalid <= 1;
-                    m_axi_wlast  <= (beat_cnt == BURST_LEN - 1) ? 1'b1 : 1'b0;
+                    m_axi_wlast  <= (beat_cnt == BURST_LAST) ? 1'b1 : 1'b0;
                     // Start read for the beat after next
                     mem_rd_addr  <= {burst_sel, rd_beat[3:0]};
                     rd_beat      <= rd_beat + 1;
@@ -467,7 +481,7 @@ module iq_dma_rx #(
                 S_RESP: begin
                     if (m_axi_bvalid && m_axi_bready) begin
                         m_axi_bready <= 0;
-                        if (wr_ptr_r + SAMPLES_PER_BURST >= DDR_BUF_SAMPLES)
+                        if ({7'b0, wr_ptr_r} + SAMPLES_PER_BURST >= DDR_BUF_SAMPLES)
                             wr_ptr_r <= 0;
                         else
                             wr_ptr_r <= wr_ptr_r + SAMPLES_PER_BURST;
