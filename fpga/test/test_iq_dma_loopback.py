@@ -599,3 +599,95 @@ async def test_loopback_ddr_integrity(dut):
                     f"got ({got_re:03X},{got_im:03X})")
 
     assert mismatches == 0, f"{mismatches} DDR integrity mismatches"
+
+
+# =========================================================
+# Test 7: Stream mode across the ring-buffer wrap
+# =========================================================
+@cocotb.test()
+async def test_loopback_stream_wrap(dut):
+    """Stream continuously past the ring wrap and confirm the DAC never stalls.
+
+    The other tests here drive one-shot and cyclic TX, so stream mode has no
+    coverage in the full DDR -> DAC -> ADC -> DDR path.  This ring is 1024
+    samples, small enough that a feeder crosses the wrap in a few thousand
+    cycles, which is where a magnitude comparison of the two ring pointers
+    reads a wrapped write cursor as "caught up" and stalls the fill FSM.
+
+    The RX side is the independent witness: it samples the DAC pins, so a
+    frozen DAC shows up as a flat run of identical captures regardless of
+    what the TX registers claim.
+    """
+    axi_tx, axi_rx, slave = await setup(dut)
+
+    buf = 1024              # tb parameter BUF_SIZE_SAMPLES
+    chunk = 128
+    await rx_enable(axi_rx, slave)
+
+    # Distinct value per ring slot so a frozen DAC is visible as repetition.
+    slave.write_iq_samples(TX_DDR_BASE, make_samples(buf))
+
+    await axi_tx.write(TX_REG_DDR_BASE, TX_DDR_BASE)
+    await axi_tx.write(TX_REG_TX_COUNT, buf)   # stream: TX_COUNT is ring size
+
+    # Prefill half the ring, then trigger — the drain FSM must never start
+    # ahead of the write cursor.
+    cursor = buf // 2
+    wr_total = cursor
+    rd_total = 0
+    rd_last = 0
+    wraps = 0
+    await axi_tx.write(TX_REG_WR_PTR, cursor)
+
+    await axi_tx.write(TX_REG_CONTROL, 0x0F)   # enable|trigger|cyclic|stream
+
+    emitted = 0
+    cycles = 0
+    for _ in range(300):
+        rd, _ = await axi_tx.read(TX_REG_RD_PTR)
+        rd_total += (rd - rd_last) & (buf - 1)
+        rd_last = rd
+        depth = wr_total - rd_total
+
+        if buf - depth - 1 >= chunk:
+            prev = cursor
+            cursor = (cursor + chunk) % buf
+            if cursor < prev:
+                wraps += 1
+            wr_total += chunk
+            await axi_tx.write(TX_REG_WR_PTR, cursor)
+
+        for _ in range(50):
+            await RisingEdge(dut.clk)
+            await Timer(1, unit="ns")
+            cycles += 1
+            if int(dut.tx_valid_out.value) == 1:
+                emitted += 1
+
+        if wraps >= 2:
+            break
+
+    await axi_tx.write(TX_REG_CONTROL, 0x02)   # stop
+
+    dut._log.info(f"stream wrap: wraps={wraps} emitted={emitted}/{cycles} "
+                  f"({100.0 * emitted / cycles:.1f}%)")
+
+    assert wraps >= 2, f"test did not reach the wrap (wraps={wraps})"
+
+    # The DAC is fed one sample per clock while data is available, so a
+    # stalled fill FSM collapses this ratio rather than nudging it.
+    ratio = emitted / cycles
+    assert ratio > 0.90, (
+        f"DAC starved across stream ring wrap: {emitted}/{cycles} "
+        f"({100.0 * ratio:.1f}%)")
+
+    # Independent confirmation from the RX side: a frozen DAC repeats one
+    # value forever, so a healthy stream must show many distinct captures.
+    sc = await rx_read_sample_count(axi_rx)
+    assert sc > 0, "RX captured nothing"
+    rx_data = slave.read_iq_samples(RX_DDR_BASE, sc)
+    distinct = len({(re & 0xFFF, im & 0xFFF) for re, im in rx_data})
+    dut._log.info(f"stream wrap: RX captured {sc}, {distinct} distinct values")
+    assert distinct > 8, (
+        f"RX saw only {distinct} distinct values in {sc} captures — "
+        f"DAC output was frozen, not streaming")

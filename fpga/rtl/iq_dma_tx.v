@@ -461,6 +461,34 @@ module iq_dma_tx #(
     // and subtractor from the critical path (F_SWAP → m_axi_araddr).
     wire [31:0] fill_ptr_next = (fill_ptr + SAMPLES_PER_BURST) & (BUF_SIZE_SAMPLES - 1);
 
+    // ---------------------------------------------------------
+    // Stream-mode "is there data to read?" test.
+    //
+    // WR_PTR is the ARM's write cursor and is exclusive: samples below it
+    // hold valid data, samples at or above it do not.  Both pointers are
+    // modular counters, so a wrapped WR_PTR is numerically smaller than
+    // fill_ptr while still being logically ahead of it.  A magnitude
+    // compare reads that as "caught up" and stalls the fill FSM forever,
+    // even with most of the ring full.  Subtracting under the ring mask
+    // gives the true distance regardless of where either pointer sits.
+    //
+    // Reads are issued one whole burst at a time, so a burst may only
+    // start when a full burst of valid samples is available.  Requiring
+    // the lag to cover a burst is what keeps the FSM from fetching
+    // samples the ARM has not written.
+    //
+    // A zero lag is empty rather than full: the feeder never advertises a
+    // completely full ring, because dma_tx_stream_available() reserves one
+    // sample so WR_PTR cannot land back on the read position.
+    function stream_has_burst;
+        input [31:0] ptr;
+        reg [31:0] lag;
+        begin
+            lag = (lcl_wr_ptr - ptr) & (BUF_SIZE_SAMPLES - 1);
+            stream_has_burst = (lag >= SAMPLES_PER_BURST);
+        end
+    endfunction
+
     // =========================================================
     // Fill FSM
     // =========================================================
@@ -511,10 +539,10 @@ module iq_dma_tx #(
                         seg_ready      <= {NUM_SEGS{1'b0}};
                         wrap_ar_issued   <= 0;
                         wrap_ar_accepted <= 0;
-                        if (lcl_stream && lcl_wr_ptr == 0) begin
-                            // Stream mode: no data written yet.
-                            // Wait for the ARM to feed data before
-                            // issuing the first DDR read.
+                        if (lcl_stream && !stream_has_burst(32'd0)) begin
+                            // Stream mode: the ARM has not yet written a
+                            // full burst.  Wait rather than issue a read
+                            // that would reach past the write cursor.
                             f_state <= F_WAIT;
                         end else begin
                             // Start first burst
@@ -680,9 +708,9 @@ module iq_dma_tx #(
                         // for immediate issue (same optimization as cyclic wrap).
                         // Uses fill_ptr_next for DDR address so stream-mode
                         // ring-buffer wrap is transparent.
-                        // In stream mode, also check we haven't caught up to
-                        // the ARM's write pointer before issuing the next read.
-                        if ((lcl_stream && fill_ptr_next >= lcl_wr_ptr) ||
+                        // In stream mode, also check the ARM has written a
+                        // full burst beyond fill_ptr_next before issuing.
+                        if ((lcl_stream && !stream_has_burst(fill_ptr_next)) ||
                             (seg_ready[fill_seg + 4'd1] || drain_clear[fill_seg + 4'd1])) begin
                             f_state <= F_WAIT;
                         end else begin
@@ -714,12 +742,11 @@ module iq_dma_tx #(
                         end
                     end else if (!seg_ready[fill_seg]) begin
                         // Target segment is free — but in stream mode,
-                        // also check we haven't caught up to the ARM's
-                        // write pointer (lcl_wr_ptr).  If fill_ptr has
-                        // reached wr_ptr, stay in F_WAIT — the ARM hasn't
-                        // written the next chunk yet.
-                        if (lcl_stream && fill_ptr >= lcl_wr_ptr) begin
-                            // Stall: caught up to write pointer
+                        // also check the ARM has written a full burst
+                        // beyond fill_ptr.  If it has not, stay in F_WAIT
+                        // until the next chunk arrives.
+                        if (lcl_stream && !stream_has_burst(fill_ptr)) begin
+                            // Stall: no full burst of new data yet
                         end else begin
                             m_axi_araddr   <= lcl_ddr_base + {fill_ptr[29:0], 2'b00};
                             m_axi_arvalid  <= 1;

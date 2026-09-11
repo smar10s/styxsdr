@@ -40,7 +40,8 @@ endif
 
 .PHONY: all_tests
 all_tests: test_axi_build_id test_async_fifo test_adc_sync test_debug_snap \
-     test_snap_axi test_iq_dma_rx test_iq_dma_tx test_hil_ctrl test_iq_dma_loopback
+     test_snap_axi test_iq_dma_rx test_iq_dma_tx test_iq_dma_tx_wrap \
+     test_hil_ctrl test_iq_dma_loopback
 
 # ---- Per-module targets ----
 
@@ -100,6 +101,15 @@ test_iq_dma_tx:
 		TOPLEVEL=iq_dma_tx \
 		VERILOG_SOURCES="$(RTL)/iq_dma_tx.v" \
 		COCOTB_TEST_MODULES=test_iq_dma_tx
+
+.PHONY: test_iq_dma_tx_wrap
+test_iq_dma_tx_wrap:
+	@echo "--- Running test_iq_dma_tx_wrap ---"
+	$(MAKE) sim SIM_BUILD=sim_build_iq_dma_tx_wrap \
+		TOPLEVEL=iq_dma_tx \
+		VERILOG_SOURCES="$(RTL)/iq_dma_tx.v" \
+		COCOTB_TEST_MODULES=test_iq_dma_tx_wrap \
+		EXTRA_ARGS="$(EXTRA_ARGS) -GBUF_SIZE_SAMPLES=1024"
 
 .PHONY: test_hil_ctrl
 test_hil_ctrl:

@@ -51,6 +51,17 @@
 /* Block size for dropout detection: ~1 ms worth of samples */
 #define ENVELOPE_BLOCK(sr)  ((size_t)((sr) / 1000))
 
+/* Buffered latency the feeder aims to keep in DDR.
+ *
+ * Without a bound the feeder fills all 32 MB, which is over three seconds
+ * of audio, and then has nothing to do but wait for the DAC to drain.  That
+ * waiting is correct behaviour, but it is indistinguishable from a feeder
+ * that cannot keep up if the only thing being counted is how often it
+ * waited.  Holding a fixed, small backlog makes a wait mean what the test
+ * wants it to mean, and matches how a real feeder bounds TX latency.
+ */
+#define STREAM_HIGH_WATER_MS   300
+
 /* --------------------------------------------------------------------------
  * NEON vectorized sin/cos (4-wide, single-precision)
  *
@@ -437,6 +448,15 @@ int main(int argc, char *argv[])
 
     int consecutive_stalls = 0;
 
+    /* Backlog the feeder maintains, in samples.  Kept well inside the ring
+     * so "ring full" and "feeder behind" stay distinguishable. */
+    uint32_t high_water = (uint32_t)(STREAM_HIGH_WATER_MS
+                                     * sample_rate_hz / 1000ULL);
+    if (high_water < DMA_TX_STREAM_CHUNK * 4)
+        high_water = DMA_TX_STREAM_CHUNK * 4;
+    if (high_water > DMA_TX_MAX_SAMPLES / 2)
+        high_water = DMA_TX_MAX_SAMPLES / 2;
+
     while (1) {
         if (styx_shutdown_requested())
             break;
@@ -452,6 +472,14 @@ int main(int argc, char *argv[])
         int avail = dma_tx_stream_available();
         if (avail < min_available) min_available = avail;
         if (avail > max_available) max_available = avail;
+
+        /* Already holding the target backlog — let the DAC drain.  This is
+         * pacing, not a shortage, so it is not counted as a stall. */
+        int32_t depth = dma_tx_stream_depth();
+        if (depth >= 0 && (uint32_t)depth + DMA_TX_STREAM_CHUNK > high_water) {
+            usleep(200);
+            continue;
+        }
 
         if (avail < DMA_TX_STREAM_CHUNK) {
             stall_cycles++;
