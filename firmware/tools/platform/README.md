@@ -12,6 +12,7 @@ buffer, and analog RF path. Use **lib80211 on ARM** for OFDM decode.
 | `pluto_burst_loopback` | Multi-frame burst: same path as loopback, multiple frames per TX |
 | `pluto_tx_beacon` | Cyclic beacon TX (stimulus generation, no RX) |
 | `pluto_dma_test` | DMA register-level start/stop/restart validation |
+| `pluto_ad9361_readback` | AD9361 readback getters vs live sysfs (LO, BW, rate) |
 
 ## Parent tools (firmware/tools/)
 

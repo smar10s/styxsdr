@@ -496,3 +496,26 @@ int hal_ad9361_set_rx_fir_en(int enable)
     return sysfs_write_ll(AD9361_IIO_PATH "in_voltage_filter_fir_en",
                           enable ? 1 : 0);
 }
+
+/* --------------------------------------------------------------------------
+ * AD9361 readback
+ *
+ * The AD9361 quantizes LO, bandwidth, and sample rate, so the hardware
+ * value can differ from what was requested.  Callers that report or track
+ * actual state read it back here.
+ * -------------------------------------------------------------------------- */
+
+long long hal_ad9361_get_rx_lo(void)
+{
+    return sysfs_read_ll(AD9361_IIO_PATH "out_altvoltage0_RX_LO_frequency");
+}
+
+long long hal_ad9361_get_rx_bandwidth(void)
+{
+    return sysfs_read_ll(AD9361_IIO_PATH "in_voltage_rf_bandwidth");
+}
+
+long long hal_ad9361_get_sample_rate(void)
+{
+    return sysfs_read_ll(AD9361_IIO_PATH "in_voltage_sampling_frequency");
+}

@@ -34,6 +34,9 @@ if(NOT STYX_HOST_BUILD)
     add_executable(pluto_stream_test tools/platform/pluto_stream_test.c)
     target_link_libraries(pluto_stream_test PRIVATE styx_tool)
 
+    add_executable(pluto_ad9361_readback tools/platform/pluto_ad9361_readback.c)
+    target_link_libraries(pluto_ad9361_readback PRIVATE styx_tool)
+
     # Tools requiring lib80211
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../extern/lib80211/CMakeLists.txt")
         add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../extern/lib80211

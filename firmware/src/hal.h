@@ -134,6 +134,10 @@ int hal_ad9361_set_rx_bandwidth(uint64_t bw_hz);
 int hal_ad9361_set_tx_bandwidth(uint64_t bw_hz);
 int hal_ad9361_set_rx_gain(double gain_db);
 double hal_ad9361_get_rx_gain(void);
+/* Hardware values after quantization — return -1 on read failure. */
+long long hal_ad9361_get_rx_lo(void);
+long long hal_ad9361_get_rx_bandwidth(void);
+long long hal_ad9361_get_sample_rate(void);
 int hal_ad9361_set_rx_gain_mode(const char *mode);
 int hal_ad9361_set_tx_attenuation(double atten_db);
 int hal_ad9361_run_calibration(void);
