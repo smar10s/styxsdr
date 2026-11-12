@@ -5,7 +5,8 @@ Make HIL playback follow the ADC sample rate, removing the hard-coded
 
 # Status
 
-Branch created. README and STATUS rewritten. RTL, tools, and tests pending.
+README and STATUS rewritten. Project ID is now part of the build
+fingerprint. RTL, tools, and tests pending.
 
 # Next Steps
 

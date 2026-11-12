@@ -66,8 +66,9 @@ if {![dict get $opts skip_project]} {
 # ============================================================================
 
 puts "========== PHASE 2: BUILD FINGERPRINT =========="
-set fingerprint [styx::fingerprint $rtl_dir $project_dir]
-styx::set_build_id $fingerprint -project_id 0x53545958
+set project_id [dict get $opts project_id]
+set fingerprint [styx::fingerprint $rtl_dir $project_dir $project_id]
+styx::set_build_id $fingerprint -project_id $project_id
 
 # ============================================================================
 # Phase 3: OOC synthesis

@@ -42,6 +42,7 @@ VIVADO_WRAPPER  ?= env LD_LIBRARY_PATH=/opt/xilinx-fixes:$$LD_LIBRARY_PATH XILIN
 PLACE_STRATEGY  ?= Explore
 OOC_MODULES     ?=
 INCREMENTAL     ?=
+PROJECT_ID      ?= 0x53545958
 
 # Directories
 ROOT_DIR        := $(abspath ..)
@@ -60,6 +61,7 @@ BUILD_TCL_ARGS  = -project_dir $(PROJECT_DIR) \
                   -rtl_dir $(RTL_DIR) \
                   -adi_hdl_dir $(ADI_HDL_DIR) \
                   -output_dir $(OUTPUT_DIR) \
+                  -project_id $(PROJECT_ID) \
                   -place_strategy $(PLACE_STRATEGY)
 
 ifneq ($(OOC_MODULES),)

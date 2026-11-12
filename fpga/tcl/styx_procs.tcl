@@ -27,7 +27,8 @@ namespace eval styx {
 # styx::parse_args — Parse command-line arguments for build.tcl drives
 #
 # Returns: dict with keys: project_dir, rtl_dir, adi_hdl_dir, output_dir,
-#          place_strategy, opt_directive, ooc_modules, incremental, skip_project
+#          project_id, place_strategy, opt_directive, ooc_modules,
+#          incremental, skip_project
 # ============================================================================
 proc styx::parse_args {argv} {
     set opts [dict create \
@@ -35,6 +36,7 @@ proc styx::parse_args {argv} {
         rtl_dir         "" \
         adi_hdl_dir     "" \
         output_dir      "" \
+        project_id      "" \
         place_strategy  "Explore" \
         opt_directive   "" \
         ooc_modules     {} \
@@ -49,6 +51,7 @@ proc styx::parse_args {argv} {
             -rtl_dir        { dict set opts rtl_dir [lindex $argv [incr i]] }
             -adi_hdl_dir    { dict set opts adi_hdl_dir [lindex $argv [incr i]] }
             -output_dir     { dict set opts output_dir [lindex $argv [incr i]] }
+            -project_id     { dict set opts project_id [lindex $argv [incr i]] }
             -place_strategy { dict set opts place_strategy [lindex $argv [incr i]] }
             -opt_directive  { dict set opts opt_directive [lindex $argv [incr i]] }
             -ooc_modules    { dict set opts ooc_modules [lindex $argv [incr i]] }
@@ -58,7 +61,7 @@ proc styx::parse_args {argv} {
         }
     }
 
-    foreach key {project_dir rtl_dir adi_hdl_dir output_dir} {
+    foreach key {project_dir rtl_dir adi_hdl_dir output_dir project_id} {
         if {[dict get $opts $key] eq ""} {
             error "Required argument -$key not provided"
         }
@@ -91,11 +94,13 @@ proc styx::create_project {adi_hdl_dir project_dir} {
 # ============================================================================
 # styx::fingerprint — Content-addressed build ID
 #
-# Hashes all RTL + TCL + XDC sources in deterministic order (sorted paths).
+# Hashes all RTL + TCL + XDC sources and the project ID in deterministic
+# order (sorted paths). The project ID is part of the build identity: two
+# projects with identical RTL must not share a fingerprint.
 # Accepts a single RTL dir (backward-compatible) or a list of RTL dirs.
 # Returns: 8-char hex string prefixed with 0x (32-bit)
 # ============================================================================
-proc styx::fingerprint {rtl_dirs project_dir} {
+proc styx::fingerprint {rtl_dirs project_dir project_id} {
     set files [list]
 
     # Normalize: single string or list
@@ -121,9 +126,12 @@ proc styx::fingerprint {rtl_dirs project_dir} {
     if {[llength $files] == 0} {
         error "styx::fingerprint: no source files found"
     }
+    if {$project_id eq ""} {
+        error "styx::fingerprint: project_id required"
+    }
 
     # Write file list to temp, hash with sha256sum
-    set manifest ""
+    set manifest "project_id=$project_id\n"
     foreach f $files {
         set fd [open $f r]
         append manifest [read $fd]
@@ -140,7 +148,7 @@ proc styx::fingerprint {rtl_dirs project_dir} {
     file delete $tmp_file
 
     set hex [string range $hash 0 7]
-    puts "FINGERPRINT: 0x$hex (from [llength $files] source files)"
+    puts "FINGERPRINT: 0x$hex (from [llength $files] source files, project $project_id)"
     return "0x$hex"
 }
 

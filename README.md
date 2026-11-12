@@ -21,8 +21,8 @@ the firmware HAL.
   valid strobe. No rate register.
 - **Debug snap** — 1024-deep BRAM capture with configurable pre/post
   trigger split.
-- **Build fingerprint** — content-addressed SHA-256 of RTL and project
-  sources, readable at runtime.
+- **Build fingerprint** — content-addressed SHA-256 of RTL, project
+  sources, and the project ID, readable at runtime.
 - **Rate-agnostic plumbing** — the ADC CDC and HIL pacing assume no
   particular sample rate. The AD9361 maximum is 61.44 MSPS.
 
