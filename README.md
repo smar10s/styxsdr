@@ -2,66 +2,29 @@
 
 **Pluto's smallest moon** — a minimal FPGA bitstream for the
 [PlutoSDR](https://www.analog.com/en/resources/evaluation-hardware-and-software/evaluation-boards-kits/adalm-pluto.html)
-(Xilinx Zynq 7010) that replaces the stock ADI IIO/DMA framework with
-custom streaming DMA engines.
-
-Continuous IQ streaming to DDR, waveform playback, hardware-in-the-loop
-test injection, and a debug capture probe — all in ~4,300 LUTs and 2
-DSPs (24.5% of Z-7010).  Designed as a reusable infrastructure platform
-that downstream projects extend by connecting processing pipelines to
-the muxed IQ outputs.
+(Xilinx Zynq 7010). It replaces the stock ADI IIO/DMA framework with
+custom streaming DMA engines: continuous IQ capture, deterministic
+playback, HIL injection, and a debug probe. ~4.4k LUTs and 2 DSPs leave
+most of the Z-7010 for downstream logic. Projects source
+`fpga/project/system_bd.tcl`, connect to the post-mux IQ stream, and link
+the firmware HAL.
 
 ## Features
 
-- **128 MB RX ring buffer** — continuous ADC capture at 20 MSPS, ~1.7 s depth
-- **32 MB TX buffer with stream mode** — one-shot, cyclic, or continuous ARM→FPGA feed via WR_PTR CDC register
-- **Two-phase TX** — load waveform (slow), trigger playback (single register write, deterministic)
-- **HIL test injection** — mux live ADC vs. DDR playback, rate-matched, for golden-vector validation
-- **Debug snap probe** — 1024-deep BRAM capture with configurable trigger position
-- **Build fingerprint** — content-addressed SHA-256 of RTL+TCL, readable at runtime
-- **Runtime sample rate** — AD9361 FIR decimation (20/10/5 MSPS), no bitstream rebuild
-
-## Releases
-
-Pre-built firmware images are available on
-[GitHub Releases](https://github.com/smar10s/styxsdr/releases).
-
-### Flashing (USB mass storage, primary)
-
-1. Download `pluto.frm` from the latest release
-2. Connect PlutoSDR to your host via USB
-3. The Pluto appears as a USB mass storage drive after ~30 seconds
-4. Copy `pluto.frm` to the drive root and wait for the write to finish
-5. Eject/unmount the drive — Pluto reboots and flashes automatically
-
-The Pluto LED blinks during flashing.  Wait until the LED stops and the
-board reappears (as mass storage or network device).  It is safe to
-power-cycle afterward.
-
-**Rev.B Pluto users** — the AD9361 defaults to AD9363A tuning range on
-Rev.B boards.  After the first flash, SSH in and run
-`bin/fix_ad9361_guardrail.sh` to unlock the full AD9361 range.
-
-### Flashing (SSH, advanced)
-
-Alternative method with checksum verification and proper erase.  Requires
-Pluto reachable at `192.168.2.1` and `sshpass` installed.
-
-```bash
-# macOS: brew install hudochenkov/sshpass/sshpass
-# Linux: apt install sshpass
-
-PLUTO_PASS=analog bin/flash.sh ~/Downloads/pluto.frm
-```
-
-### Post-flash Validation
-
-```bash
-PLUTO_PASS=analog bin/validate.sh
-```
-
-This checks AD9361 initialization and verifies the build fingerprint
-matches the release artifact.
+- **128 MB RX ring** — 33,554,432 samples. Depth follows the configured
+  rate: 1.68 s at 20 MSPS, 1.09 s at 30.72 MSPS.
+- **32 MB TX/HIL buffer** — 8,388,608 samples. One-shot, cyclic, or
+  continuous ARM-fed streaming.
+- **Two-phase TX** — load the waveform slowly, then trigger with a single
+  deterministic register write.
+- **HIL injection** — mux live ADC against DDR playback, paced by the ADC
+  valid strobe. No rate register.
+- **Debug snap** — 1024-deep BRAM capture with configurable pre/post
+  trigger split.
+- **Build fingerprint** — content-addressed SHA-256 of RTL and project
+  sources, readable at runtime.
+- **Rate-agnostic plumbing** — the ADC CDC and HIL pacing assume no
+  particular sample rate. The AD9361 maximum is 61.44 MSPS.
 
 ## Quick Start
 
@@ -80,90 +43,107 @@ make flash              # writes to PlutoSDR via SSH (see bin/flash.sh)
 make validate           # checks AD9361 init + fingerprint register
 ```
 
-### Prerequisites
+Requires Vivado 2025.2, Docker, and — for simulation — Python 3.11+ with
+`cocotb` and Verilator.
 
-- **Vivado 2025.2** (synthesis/implementation) — local or on a remote build host
-- **Docker** (firmware cross-compile, plutosdr-fw base build)
-- **Python 3.11+** with `cocotb` and `find_libpython` (simulation only)
-- **Verilator** (RTL lint and simulation only)
+### Flashing
 
-### Testing
+Pre-built `pluto.frm` images are on
+[GitHub Releases](https://github.com/smar10s/styxsdr/releases).
+
+Primary path: copy `pluto.frm` to the Pluto's USB mass-storage drive and
+eject. The LED blinks while flashing; wait for the board to reappear.
+
+SSH path, with checksum verification:
 
 ```bash
-make sim                # run all 63 cocotb RTL tests (Verilator)
-make test               # host-native firmware unit tests (no cross-compiler needed)
-make waves TARGET=test_iq_dma_rx   # generate VCD for a specific module
+PLUTO_PASS=analog bin/flash.sh ~/Downloads/pluto.frm
 ```
 
-## Architecture
+**Rev.B Pluto users** — the AD9361 defaults to AD9363A tuning range on
+Rev.B boards. After the first flash, SSH in and run
+`bin/fix_ad9361_guardrail.sh` to unlock the full AD9361 range.
 
-```
-AD9361 ADC ─→ [FIR, dec] ─→ adc_sync (CDC) ─→ iq_dma_rx ─→ DDR ring buffer (128 MB)
-                                                     │
-                                                     ▼
-                                                hil_ctrl (mux) ─→ [downstream pipeline]
-                                                     │
-                                                     ▼
-                                                snap_axi (debug probe)
+### Validation
 
-DDR TX buffer (32 MB) ─→ iq_dma_tx (one-shot / cyclic / stream) ─→ [FIR, interp] ─→ AD9361 DAC
-DDR buffer ─→ hil_ctrl (test playback mode)
+```bash
+PLUTO_PASS=analog bin/validate.sh
 ```
 
-| Module       | Purpose |
-|--------------|---------|
-| **iq_dma_rx** | ADC-to-DDR via AXI3 HP0. Double-buffered BRAM, 128 MB circular buffer, 20 MSPS sustained. |
-| **iq_dma_tx** | DDR-to-DAC via AXI3 HP2. 16-segment BRAM fill pipeline, zero-bubble drain FSM, speculative wrap AR, stream mode with WR_PTR CDC. |
-| **hil_ctrl**  | HIL test controller. IQ mux between live ADC and DDR playback, rate-matched (1 sample per 5 clocks). |
-| **snap_axi**  | Debug capture probe. 1024-deep BRAM, pre/post trigger split, AXI4-Lite read-back. |
-| **adc_sync**  | CDC from AD9361 l_clk (~20 MHz) to fabric sys_cpu_clk (100 MHz) via gray-code async FIFO. |
-| **axi_build_id** | Read-only 32-bit register. SHA-256 fingerprint of RTL + TCL sources, injected at synthesis. |
-| **tb_iq_dma_loopback** | TX→RX co-simulation testbench with decimator (5:1 clock ratio) and credit-sensitive AXI3 mocking. |
+This checks AD9361 initialization and verifies the build fingerprint.
 
-### DDR Memory Map
+## Fabric Modules
 
-| Region     | Size   | Purpose                |
-|------------|--------|------------------------|
-| 0x10000000 | 128 MB | RX ring buffer         |
-| 0x18000000 | 32 MB  | TX buffer (waveform / stream / HIL data) |
+| Module | Purpose |
+|---|---|
+| **iq_dma_rx** | ADC-to-DDR via AXI3 HP0. 128 MB circular buffer, double-buffered BRAM fill. |
+| **iq_dma_tx** | DDR-to-DAC via AXI3 HP2. 16-segment fill pipeline, zero-bubble drain, stream mode with WR_PTR CDC. |
+| **hil_ctrl** | Test mux and DDR playback. Output is paced by the post-CDC ADC valid strobe. |
+| **snap_axi** | Debug capture probe. 1024-deep BRAM, pre/post trigger split, AXI4-Lite read-back. |
+| **adc_sync** | Ratio-safe async FIFO from AD9361 `l_clk` to `sys_cpu_clk`. |
+| **axi_build_id** | Read-only 32-bit fingerprint register. |
 
-160 MB reserved from 0x10000000 by device tree overlay (`styx-pluto.dtso`).
-Stock ADI DMA engines are disabled.
+RX data path: ADC → `adc_sync` → `iq_dma_rx` (live capture) and
+`adc_sync` → `hil_ctrl` mux → downstream and snap. `iq_dma_rx` taps
+before the mux, so DDR captures the live ADC only. TX data path:
+DDR → `iq_dma_tx` → DAC.
 
-**IQ sample packing**: each 32-bit DDR word is `{8'b0, imag[11:0], real[11:0]}`.
+## Memory Map and Sample Packing
+
+| Region | Size | Contents |
+|---|---|---|
+| 0x10000000 | 128 MB | RX ring buffer (33,554,432 samples) |
+| 0x18000000 | 32 MB | TX / HIL playback / stream (8,388,608 samples) |
+
+160 MB reserved from 0x10000000 by the device tree overlay
+(`styx-pluto.dtso`). Stock ADI DMA engines are disabled.
+
+**IQ packing**: each 32-bit DDR word is `{8'b0, imag[11:0], real[11:0]}`.
 AXI bursts pack two samples per 64-bit beat (`{word_odd, word_even}`).
 Burst length is 16 beats = 128 bytes = 32 IQ samples.
 
-### Sample Rates
+HIL playback shares the 32 MB TX region, so the same depth limit applies:
+0.42 s at 20 MSPS, 0.27 s at 30.72 MSPS.
 
-The AD9361 internal FIR + HB decimation chain is configured at runtime
-via sysfs — no bitstream rebuild needed:
+## Sample Rate and HIL Pacing
 
-| Decimation | Effective Rate | DDR BW (RX) | Use Case               |
-|------------|---------------|-------------|------------------------|
-| 1x         | 20 MSPS       | 80 MB/s     | 802.11 (20 MHz BW)     |
-| 2x         | 10 MSPS       | 40 MB/s     | General wideband       |
-| 4x         | 5 MSPS        | 20 MB/s     | Narrowband (LoRa, BLE) |
+The AD9361 rate is set at runtime through IIO; no bitstream rebuild is
+needed. The fabric assumes no particular rate:
+
+- `adc_sync` is an async FIFO that is safe across the AD9361 range.
+- `hil_ctrl` advances playback on the same post-CDC `adc_valid` strobe
+  the live data path uses.
+
+HIL therefore matches the configured rate exactly, including runtime rate
+changes. There is no HIL rate register to keep in sync with the AD9361.
+
+Consequences worth knowing:
+
+- HIL requires the ADC to be streaming. If it is not, playback does not
+  advance.
+- HIL replaces the ADC at the mux; it is never summed with live samples.
+- `iq_dma_rx` taps the ADC before the mux, so DDR never contains HIL data.
+  HIL is visible downstream and at the snap probe.
+- Downstream logic must derive timing from the sample strobe, not from the
+  100 MHz fabric clock.
 
 ## Firmware API
 
-The C firmware runs on the Zynq PS (ARM Cortex-A9) under Linux.  It
+The C firmware runs on the Zynq PS (ARM Cortex-A9) under Linux. It
 provides register access via `/dev/mem` mmap and DMA convenience
 functions.
 
-### Headers
+| Header | Purpose |
+|---|---|
+| `hal.h` | Register map defines, IQ pack/unpack macros, AD9361 sysfs wrappers |
+| `dma_rx.h` | RX ring buffer: start, stop, read write-pointer, blocking capture |
+| `dma_tx.h` | TX waveform: one-shot, two-phase load/trigger, cyclic, continuous streaming, stop |
+| `convert.h` | DDR ↔ float conversion (auto-scale TX, sign-extended RX) |
 
-| Header       | Purpose |
-|--------------|---------|
-| `hal.h`      | Register map defines, IQ pack/unpack macros, AD9361 sysfs wrappers |
-| `dma_rx.h`   | RX ring buffer: start, stop, read write-pointer, blocking capture |
-| `dma_tx.h`   | TX waveform: one-shot, two-phase load/trigger, cyclic, continuous streaming, stop |
-| `convert.h`  | DDR ↔ float conversion (auto-scale TX, sign-extended RX) |
+### One-Shot TX/RX Loopback
 
-### Two-Phase TX/RX Loopback
-
-The key DMA pattern — separate the slow work (DDR writes, conversion)
-from the fast trigger (single register store):
+Separate the slow work (DDR writes, conversion) from the fast trigger
+(single register store):
 
 ```c
 #include "hal.h"
@@ -196,8 +176,8 @@ trigger, so the transmitted frame is guaranteed to appear shortly after
 
 ### Continuous Streaming TX
 
-For long-duration waveforms where pre-loading would exceed the buffer,
-feed the FPGA continuously in small chunks:
+For waveforms that exceed the 32 MB buffer, feed the fabric in small
+chunks:
 
 ```c
 #include "hal.h"
@@ -205,12 +185,12 @@ feed the FPGA continuously in small chunks:
 
 float real[DMA_TX_STREAM_CHUNK];
 float imag[DMA_TX_STREAM_CHUNK];
-generate_tone(real, imag, DMA_TX_STREAM_CHUNK);  // fill once
+generate_tone(real, imag, DMA_TX_STREAM_CHUNK);
 
-dma_tx_stream_start();          // 32 MB ring buffer, cyclic+stream mode
+dma_tx_stream_start();
 
 uint64_t t0 = time_ms();
-while (time_ms() - t0 < 8000) {  // 8 seconds
+while (time_ms() - t0 < 8000) {
     // wait for headroom before feeding the next chunk
     while (dma_tx_stream_available() < DMA_TX_STREAM_CHUNK)
         usleep(200);
@@ -220,9 +200,9 @@ while (time_ms() - t0 < 8000) {  // 8 seconds
 dma_tx_stream_stop();
 ```
 
-The fill FSM wraps at the 32 MB boundary automatically.  `dma_tx_stream_feed()`
-issues a memory barrier before updating the WR_PTR register so the FPGA sees
-all committed DDR stores.
+The fill FSM wraps at the 32 MB boundary automatically.
+`dma_tx_stream_feed()` issues a memory barrier before updating the WR_PTR
+register so the FPGA sees all committed DDR stores.
 
 ### Blocking RX Capture
 
@@ -234,134 +214,91 @@ if (n > 0) {
 }
 ```
 
-`dma_rx_capture()` polls the write pointer at 50 µs intervals and
-handles ring-buffer wrap transparently.
+`dma_rx_capture()` polls the write pointer at 50 µs intervals and handles
+ring-buffer wrap transparently.
 
-### Register-Level Control
-
-All engines expose registers over AXI4-Lite for direct access:
-
-```c
-// One-shot TX at register level
-hal_reg_write(REG_IQ_DMA_TX_DDR_BASE, DDR_TX_BASE);
-hal_reg_write(REG_IQ_DMA_TX_COUNT, n_samples);
-hal_reg_write(REG_IQ_DMA_TX_CONTROL, TX_CTRL_ENABLE | TX_CTRL_TRIGGER);
-while (!dma_tx_done()) usleep(100);
-
-// Check RX overflow diagnostic
-uint32_t status = hal_reg_read(REG_IQ_DMA_RX_STATUS);
-uint16_t overflows = (status >> 16) & 0xFFFF;
-```
+Register-level control is available through `hal.h`; see
+[registers.md](registers.md).
 
 ### HIL Test Injection
 
-Golden waveform injection for pipeline validation without RF.
-`hil_ctrl` switches the IQ mux from live ADC to DDR playback,
-rate-matched to the ADC clock:
+Golden waveform injection without RF. `hil_ctrl` switches the IQ mux
+from the live ADC to DDR playback, paced by the ADC sample strobe:
 
 ```bash
 hil_inject -v -w    # load hil_golden.json, verify watermark, capture snap
 ```
 
-`firmware/vectors/hil_golden.json` contains a 1024-sample test vector:
-- Samples 0–2: ASCII watermark (identity check)
-- Samples 3–1023: linear chirp 0.5–9.5 MHz, full 12-bit dynamic range
+`firmware/vectors/hil_golden.json` is a 1024-sample vector: a 3-sample
+ASCII watermark, then a 0.5–9.5 MHz chirp.
+
+## Testing and CI
+
+```bash
+make sim                # full cocotb RTL suite (Verilator)
+make test               # host-native firmware unit tests
+make waves TARGET=test_iq_dma_rx   # VCD for one module
+```
+
+GitHub Actions runs on push and pull request: Verilator lint, the full
+cocotb suite, and host-native firmware tests.
+
+## Downstream Integration
+
+1. Add styx as a git submodule.
+2. Source `fpga/project/system_bd.tcl` in your block design.
+3. Connect to `hil_ctrl_0/iq_*` — the post-mux stream, paced by the ADC
+   valid strobe.
+4. Link against the firmware HAL (`hal.c`, `dma_rx.c`, `dma_tx.c`,
+   `convert.c`).
+5. Use `fpga/tcl/styx_procs.tcl` for build automation (OOC synthesis,
+   incremental builds).
+
+`iq_dma_rx` captures the ADC before the mux. If your project needs HIL
+data in DDR, reconnect the capture tap; that is a project-level decision.
+
+`hil_ctrl` reserves registers 0x14–0x38 for downstream control and status,
+so a project can extend it without modifying styx RTL.
+
+## Resources
+
+Post-route, Vivado 2025.2, Zynq 7010:
+
+| Resource | Used | Available | % |
+|---|---|---|---|
+| Slice LUTs | 4,427 | 17,600 | 25.2% |
+| Slice Registers | 6,385 | 35,200 | 18.1% |
+| Block RAM Tiles | 3 | 60 | 5.0% |
+| DSP Blocks | 2 | 80 | 2.5% |
+
+Leaves 75% of LUTs and 95% of BRAM free for downstream logic.
 
 ## Project Layout
 
 ```
 styx/
-├── Makefile                Top-level orchestration (make help for targets)
-├── config.mk.example      Build config template (remote host, Vivado path, etc.)
-├── registers.md           Full register map documentation
-├── fpga/
-│   ├── Makefile            FPGA build targets (bitstream, sim, lint, waves)
-│   ├── rtl/                Custom Verilog modules (7 files, +1 loopback testbench)
-│   ├── project/            Vivado project (block design, top wrapper, constraints)
-│   ├── tcl/                Build procs and batch driver
-│   ├── test/               Cocotb + Verilator simulation (76 tests, 9 modules)
+├── Makefile                Top-level orchestration (make help)
+├── config.mk.example      Build config template
+├── registers.md           Register map
+├── fpga/                   RTL, block design, build TCL, cocotb tests
 │   └── extern/adi-hdl/     ADI HDL IP library (submodule)
-├── firmware/
-│   ├── src/                HAL + DMA drivers (hal, dma_rx, dma_tx, convert)
-│   ├── test/               Host-native unit tests (IQ conversion)
-│   ├── tools/              On-target utilities (adc_capture, hil_inject)
-│   ├── tools/platform/     Platform test programs (loopback, beacon, DMA test)
-│   ├── vectors/            HIL test vectors + generator script
-│   ├── docker/             Cross-compile containers (ARM + plutosdr-fw)
-│   └── cmake/              Toolchain file
-├── packaging/
-│   ├── package.sh          Builds pluto.frm (FIT image + MD5 checksum)
-│   ├── styx-pluto.dtso     Device tree overlay (reserves DDR, disables ADI DMA)
-│   └── patch_adi_loadvals.sh
-├── bin/                    Operator scripts (flash.sh, validate.sh)
-├── extern/
-│   ├── plutosdr-fw/        PlutoSDR firmware base (submodule)
-│   └── lib80211/           802.11 PHY library (submodule)
+├── firmware/               HAL, DMA drivers, tools, HIL vectors
+├── packaging/              pluto.frm build, device tree overlay
+├── bin/                    Operator scripts (flash, validate)
+├── extern/                 plutosdr-fw, lib80211 (submodules)
 └── build/                  Output artifacts (gitignored)
 ```
 
-## Build Targets
-
-| Target | Description |
-|--------|-------------|
-| `make all` | bitstream + firmware + package |
-| `make bitstream` | FPGA synthesis + implementation (local or remote) |
-| `make firmware` | ARM cross-compile via Docker |
-| `make package` | Create flashable pluto.frm |
-| `make flash` | Write pluto.frm to PlutoSDR USB mass storage |
-| `make validate` | Post-flash check (AD9361 init, build ID register) |
-| `make deploy` | SCP firmware binaries to PlutoSDR `/usr/bin/` |
-| `make sim` | Run full cocotb RTL simulation suite |
-| `make test` | Host-native firmware unit tests |
-| `make waves` | Generate VCD waveforms (`TARGET=test_xxx`) |
-| `make clean` | Remove all build artifacts |
-| `make help` | List all targets with descriptions |
-
-## Resource Utilization
-
-Post-route, Vivado 2025.2, Zynq 7010:
-
-| Resource        | Used  | Available | %     |
-|-----------------|-------|-----------|-------|
-| Slice LUTs      | 4,427 | 17,600    | 25.2% |
-| Slice Registers | 6,385 | 35,200    | 18.1% |
-| Block RAM Tiles | 3     | 60        | 5.0%  |
-| DSP Blocks      | 2     | 80        | 2.5%  |
-
-Leaves 75% of LUTs and 95% of BRAM free for downstream logic.
-
-## Downstream Integration
-
-To use styx as infrastructure for a larger project:
-
-1. Add styx as a git submodule
-2. Source `fpga/project/system_bd.tcl` in your block design
-3. Connect to `hil_ctrl_0/iq_*` outputs (post-mux IQ stream, rate-matched)
-4. Link against the firmware HAL (`hal.c`, `dma_rx.c`, `dma_tx.c`, `convert.c`)
-5. Use `fpga/tcl/styx_procs.tcl` for build automation (OOC synthesis, incremental builds)
-
-The `hil_ctrl` module reserves registers 0x14–0x38 for downstream
-extension — your project can add custom control/status registers in that
-address range without modifying styx RTL.
-
-## CI
-
-GitHub Actions runs on push/PR to `main`:
-
-1. **RTL lint** — Verilator strict warnings on all modules
-2. **RTL sim** — full cocotb test suite (76 tests across 9 modules)
-3. **Firmware tests** — host-native build + ctest
-
 ## Further Reading
 
-- [registers.md](registers.md) — complete register map with bit-field descriptions
-- `fpga/rtl/*.v` — Verilog sources with inline architecture commentary
-- `fpga/test/test_*.py` — cocotb testbenches (readable as spec-by-example)
+- [registers.md](registers.md) — complete register map with bit fields
+- `fpga/rtl/*.v` — Verilog sources with architecture commentary
+- `fpga/test/test_*.py` — cocotb testbenches, readable as spec-by-example
 - `firmware/tools/platform/README.md` — on-target test utility guide
 - `config.mk.example` — all build options documented inline
 
 ## License
 
-MIT.  `fpga/project/system_top.v` and
+MIT. `fpga/project/system_top.v` and
 `fpga/project/constraints/system_constr.xdc` retain their original
 ADI-BSD / GPLv2 dual license.
