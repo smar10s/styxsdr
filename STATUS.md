@@ -9,8 +9,10 @@ RTL, tests, tools, and docs are done. HIL advances on `adc_valid` after
 a FIFO fill gate. ADC_CNT counts in both modes. A sticky underrun
 counter lives at 0x14 (W1C). The mux select is registered on the strobe.
 
-Bitstream fingerprint `0x4299c167`, timing MET (WNS +1.124 ns), project
-ID `STYX`. Flashed and `make validate` passes.
+Bitstream fingerprint `0x59c34a0d`, timing MET (WNS +2.071 ns), 4369
+LUTs, project ID `STYX`. The FIFO now maps to block RAM instead of 128
+LUTRAMs, which frees the Deimos placement margin without changing HIL
+behavior. Flashed and `make validate` passes.
 
 Hardware evidence:
 - HIL golden vector at 20 MSPS: watermark OK, 512 samples verified.
