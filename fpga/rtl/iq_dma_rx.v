@@ -7,15 +7,15 @@
 // in a circular buffer.  No triggering, no gating, no slots — just a
 // continuous write pointer that wraps.
 //
-// IQ samples arrive from adc_sync at ~20 MSPS into a 100 MHz fabric
-// clock.  Accumulate 32 samples (16 pairs) in a BRAM-backed buffer,
-// then burst-write to DDR as 16 × 64-bit beats.
+// IQ samples arrive from adc_sync at the configured ADC rate into a
+// 100 MHz fabric clock. Accumulate 32 samples (16 pairs) in a
+// BRAM-backed buffer, then burst-write to DDR as 16 × 64-bit beats.
 //
 // Double-buffered via a single 32×64-bit BRAM addressed as two halves
 // (buf_sel=0 → entries 0..15, buf_sel=1 → entries 16..31).  While
 // one half is being burst-written to DDR, the other accepts incoming
-// samples.  At the real 5:1 clock ratio this never overflows; overflow
-// is counted for diagnostics if AXI stalls badly.
+// samples.  At the supported rates this never overflows; overflow is
+// counted for diagnostics if AXI stalls badly.
 //
 // Previous register-file implementation (buf0[0:31], buf1[0:31]) used
 // per-element write-enables that synthesised to ~41 unique control sets,
@@ -45,7 +45,7 @@ module iq_dma_rx #(
     (* X_INTERFACE_PARAMETER = "POLARITY ACTIVE_HIGH" *)
     input  wire        rst,
 
-    // IQ input (from adc_sync, sys_cpu_clk domain, ~20 MSPS into 100 MHz fabric)
+    // IQ input (from adc_sync, sys_cpu_clk domain, configured ADC rate)
     input  wire [11:0] re_in,
     input  wire [11:0] im_in,
     input  wire        valid_in,
@@ -365,9 +365,10 @@ module iq_dma_rx #(
     // regardless of wready timing, the FSM inserts a 1-cycle gap
     // (S_NEXT) between each AXI W beat to allow the BRAM read to
     // settle.  This trades throughput (2 clocks/beat instead of 1)
-    // for correctness.  At 20 MSPS into 100 MHz, a 32-sample burst
-    // takes 32 clocks (16 beats × 2 clocks/beat).  Samples arrive
-    // every 5 clocks, giving 160 clocks per burst — 5× margin.
+    // for correctness.  A 32-sample burst takes 32 clocks.  Samples
+    // arrive at 100 MHz divided by the ADC rate, so at 61.44 MSPS
+    // a burst has 52 sample clocks — 1.6× margin.  Lower rates have
+    // proportionally more margin.
     //
     // Schedule:
     //   S_IDLE  → addr = beat 0

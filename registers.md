@@ -126,15 +126,16 @@ FIFO.
 | 0x08   | DDR_BASE   | R/W    | Physical DDR base of test waveform               |
 | 0x0C   | PLAY_COUNT | R/W    | Number of IQ samples to play back               |
 | 0x10   | PLAY_PTR   | RO     | Current playback position (sample index)         |
-| 0x3C   | ADC_CNT    | RO     | `[31:0]` adc_valid pulse counter (live mode only) |
+| 0x14   | UNDERRUN   | R/W    | `[31:0]` sticky underrun count (write 1 to clear) |
+| 0x3C   | ADC_CNT    | RO     | `[31:0]` adc_valid pulse counter (live and test mode) |
 
-**0x14–0x38**: reserved for downstream extension registers.
+**0x18–0x38**: reserved for downstream extension registers.
 
 **Test mode**: set test_mode=1, write DDR_BASE and PLAY_COUNT, then
-trigger.  The mux switches from live ADC to DDR playback for the
-specified duration, then de-asserts test_mode and switches back.
-Playback is rate-matched to live ADC (1 sample per 5 clocks at 100
-MHz).
+trigger. The mux switches from live ADC to DDR playback for the
+specified duration, then switches back. Playback advances on the ADC
+sample strobe and waits for the FIFO to fill before the first sample.
+A strobe that finds the FIFO empty increments UNDERRUN.
 
 ## axi_build_id (0x43C00000)
 
