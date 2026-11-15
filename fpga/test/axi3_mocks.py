@@ -208,6 +208,7 @@ class Axi3ReadSlave:
         self.mem = {}  # byte_addr -> byte value (pre-loaded)
         self.rvalid_delay = rvalid_delay
         self.jitter_range = jitter_range
+        self.stall_rvalid = False
         self.reads = []  # list of (base_addr, burst_len) for diagnostics
 
     def _sig(self, name):
@@ -286,6 +287,9 @@ class Axi3ReadSlave:
                 if self.jitter_range > 0:
                     delay += random.randint(0, self.jitter_range)
                 for _ in range(delay):
+                    await RisingEdge(self.clk)
+
+                while self.stall_rvalid:
                     await RisingEdge(self.clk)
 
                 # Read data from memory

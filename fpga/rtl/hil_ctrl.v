@@ -16,14 +16,15 @@
 //   0x08  DDR_BASE   RW  Physical DDR base of test waveform
 //   0x0C  PLAY_COUNT RW  Number of IQ samples to play back
 //   0x10  PLAY_PTR   RO  Current playback position (sample index)
-//   0x14–0x38        --  Reserved for downstream extension
-//   0x3C  ADC_CNT    RO  [31:0]=adc_valid pulse counter (live mode only)
+//   0x14  UNDERRUN   RW  [31:0] sticky underrun count (write 1 to clear)
+//   0x18–0x38        --  Reserved for downstream extension
+//   0x3C  ADC_CNT    RO  [31:0]=adc_valid pulse counter
 //
 // DDR packing (matches iq_dma_rx/tx):
 //   32-bit word: {8'b0, im[11:0], re[11:0]}
 //   64-bit beat: {word_odd, word_even}  (even at lower addr)
 //
-// Playback outputs one sample per clock with valid=1 while active.
+// Playback emits one sample per ADC strobe after the FIFO fills.
 
 module hil_ctrl #(
     parameter BURST_LEN = 16
@@ -156,6 +157,9 @@ module hil_ctrl #(
     reg [31:0] reg_ddr_base;
     reg [31:0] reg_play_count;
     reg [31:0] play_ptr;
+    reg [31:0] underrun_count;
+    reg        underrun_clear;
+    reg        test_mode_sel;
     reg        playback_active;
     reg        playback_done;
     reg        trigger_latch;    // set by write, cleared by FSM
@@ -188,7 +192,10 @@ module hil_ctrl #(
             reg_ddr_base    <= 32'h10000000;
             reg_play_count  <= 0;
             trigger_latch   <= 0;
+            underrun_clear  <= 0;
         end else begin
+            underrun_clear <= 0;
+
             // Write address + data (combined handshake)
             if (~s_axi_awready && s_axi_awvalid && s_axi_wvalid && aw_en) begin
                 s_axi_awready <= 1;
@@ -208,6 +215,10 @@ module hil_ctrl #(
                     end
                     4'd2: reg_ddr_base   <= s_axi_wdata;
                     4'd3: reg_play_count <= s_axi_wdata;
+                    4'd5: begin
+                        if (|s_axi_wdata)
+                            underrun_clear <= 1;
+                    end
                     default: ;
                 endcase
             end
@@ -239,6 +250,7 @@ module hil_ctrl #(
                     4'd2:  s_axi_rdata <= reg_ddr_base;
                     4'd3:  s_axi_rdata <= reg_play_count;
                     4'd4:  s_axi_rdata <= play_ptr;
+                    4'd5:  s_axi_rdata <= underrun_count;
                     4'd15: s_axi_rdata <= adc_valid_cnt;
                     default: s_axi_rdata <= 32'd0;
                 endcase
@@ -254,20 +266,35 @@ module hil_ctrl #(
     // =========================================================
     // ADC Valid Counter (diagnostic — proves adc_valid reaches hil_ctrl)
     // =========================================================
+    // Counts in both live and test mode. The HIL preflight needs a
+    // counter that keeps moving while playback is armed.
     reg [31:0] adc_valid_cnt;
 
     always @(posedge clk) begin
         if (rst)
             adc_valid_cnt <= 0;
-        else if (adc_valid && !reg_test_mode)
+        else if (adc_valid)
             adc_valid_cnt <= adc_valid_cnt + 1;
+    end
+
+    // =========================================================
+    // Mode Select (registered on the ADC strobe boundary)
+    // =========================================================
+    // Taking the mux select straight from the AXI-Lite register can
+    // drop or duplicate a sample if a write lands on a strobe. Latch
+    // the request on the strobe so the change is ordered against data.
+    always @(posedge clk) begin
+        if (rst)
+            test_mode_sel <= 0;
+        else if (adc_valid)
+            test_mode_sel <= reg_test_mode;
     end
 
     // =========================================================
     // DDR Read FSM
     // =========================================================
     // Each 64-bit beat = 2 IQ samples. Burst of 16 = 32 samples.
-    // Unpack into a 64-deep sample FIFO (distributed RAM).
+    // Unpack into a 256-deep sample FIFO (block RAM).
 
     localparam S_IDLE = 3'd0;
     localparam S_AR   = 3'd1;   // Assert read address
@@ -284,12 +311,17 @@ module hil_ctrl #(
     reg        fifo_reset;      // pulse: reset read pointer on new playback
 
     // FIFO (BRAM, 256×32)
+    localparam FIFO_DEPTH = 256;
+    localparam [8:0] FILL_LEVEL = 9'd192;   // start playback at 3/4 full
     (* ram_style = "block" *) reg [31:0] fifo [0:255];
     reg [8:0]  wr_ptr, rd_ptr;
     wire [7:0] wr_addr = wr_ptr[7:0];
     wire [7:0] rd_addr = rd_ptr[7:0];
     wire empty = (wr_ptr == rd_ptr);
     wire full  = (wr_ptr[8] != rd_ptr[8]) && (wr_ptr[7:0] == rd_ptr[7:0]);
+    wire [8:0] fifo_level = wr_ptr - rd_ptr;
+    wire [8:0] fill_target = (reg_play_count < FILL_LEVEL)
+                             ? reg_play_count[8:0] : FILL_LEVEL;
 
     wire has_burst_space = ((wr_ptr - rd_ptr) <= 9'd224);  // room for 32 more
 
@@ -382,47 +414,53 @@ module hil_ctrl #(
     end
 
     // =========================================================
-    // FIFO Read — one sample per 5 clocks (matches live ADC rate)
+    // FIFO Read — one sample per ADC strobe after the fill gate
     // =========================================================
-    // In live mode, ADC delivers 20 MSPS into 100 MHz fabric = 1 valid per 5
-    // clocks. Test mode must match this rate so that ALL downstream modules
-    // (stf_detect BRAM timing, ltf_correlator 4-stage pipeline, rx_top
-    // windowed-max) operate identically to live mode. Without this gating,
-    // the correlator never completes its 4-stage accumulation and the
-    // windowed-max path is broken for burst frame 2+.
+    // Playback follows the post-CDC adc_valid strobe, so HIL matches
+    // whatever rate the AD9361 is running. The fill gate gives DDR
+    // latency a cushion before the first sample. If a strobe still
+    // finds the FIFO empty, the sticky underrun counter records it.
     reg        test_valid;
     reg [11:0] test_re;
     reg [11:0] test_im;
-    reg [2:0]  test_div;   // modulo-5 divider (0-4)
+    reg        play_started;
 
     always @(posedge clk) begin
         if (rst) begin
-            test_valid <= 0;
-            test_re    <= 0;
-            test_im    <= 0;
-            rd_ptr     <= 0;
-            play_ptr   <= 0;
-            test_div   <= 0;
+            test_valid     <= 0;
+            test_re        <= 0;
+            test_im        <= 0;
+            rd_ptr         <= 0;
+            play_ptr       <= 0;
+            play_started   <= 0;
+            underrun_count <= 0;
         end else if (fifo_reset) begin
-            test_valid <= 0;
-            rd_ptr     <= 0;
-            play_ptr   <= 0;
-            test_div   <= 0;
+            test_valid   <= 0;
+            rd_ptr       <= 0;
+            play_ptr     <= 0;
+            play_started <= 0;
         end else begin
-            if (!empty && playback_active && test_div == 0) begin
-                test_valid <= 1;
-                test_re    <= fifo[rd_addr][11:0];
-                test_im    <= fifo[rd_addr][23:12];
-                rd_ptr     <= rd_ptr + 1;
-                play_ptr   <= play_ptr + 1;
+            if (!play_started && playback_active &&
+                (fifo_level >= fill_target))
+                play_started <= 1;
+
+            if (underrun_clear)
+                underrun_count <= 0;
+
+            if (adc_valid && playback_active && play_started) begin
+                if (!empty) begin
+                    test_valid <= 1;
+                    test_re    <= fifo[rd_addr][11:0];
+                    test_im    <= fifo[rd_addr][23:12];
+                    rd_ptr     <= rd_ptr + 1;
+                    play_ptr   <= play_ptr + 1;
+                end else begin
+                    test_valid <= 0;
+                    if (!underrun_clear && (play_ptr < reg_play_count))
+                        underrun_count <= underrun_count + 1;
+                end
             end else begin
                 test_valid <= 0;
-            end
-            // Advance divider (free-running while playback active)
-            if (playback_active) begin
-                test_div <= (test_div == 3'd4) ? 3'd0 : test_div + 1;
-            end else begin
-                test_div <= 0;
             end
         end
     end
@@ -432,11 +470,11 @@ module hil_ctrl #(
     // =========================================================
     // IQ Mux
     // =========================================================
-    assign iq_valid = reg_test_mode ? test_valid : adc_valid;
-    assign iq_re    = reg_test_mode ? $signed(test_re) : adc_re;
-    assign iq_im    = reg_test_mode ? $signed(test_im) : adc_im;
+    assign iq_valid = test_mode_sel ? test_valid : adc_valid;
+    assign iq_re    = test_mode_sel ? $signed(test_re) : adc_re;
+    assign iq_im    = test_mode_sel ? $signed(test_im) : adc_im;
 
-    // Expose test_mode for trigger gating
-    assign test_mode_out = reg_test_mode;
+    // Expose the registered mode for trigger gating
+    assign test_mode_out = test_mode_sel;
 
 endmodule
