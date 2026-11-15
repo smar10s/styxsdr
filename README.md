@@ -262,7 +262,7 @@ cocotb suite, and host-native firmware tests.
 `iq_dma_rx` captures the ADC before the mux. If your project needs HIL
 data in DDR, reconnect the capture tap; that is a project-level decision.
 
-`hil_ctrl` reserves registers 0x14–0x38 for downstream control and status,
+`hil_ctrl` reserves registers 0x18–0x38 for downstream control and status,
 so a project can extend it without modifying styx RTL.
 
 ## Resources
@@ -271,9 +271,9 @@ Post-route, Vivado 2025.2, Zynq 7010:
 
 | Resource | Used | Available | % |
 |---|---|---|---|
-| Slice LUTs | 4,427 | 17,600 | 25.2% |
-| Slice Registers | 6,385 | 35,200 | 18.1% |
-| Block RAM Tiles | 3 | 60 | 5.0% |
+| Slice LUTs | 4,369 | 17,600 | 24.8% |
+| Slice Registers | 6,535 | 35,200 | 18.6% |
+| Block RAM Tiles | 3 (incl. 1 RAMB18) | 60 | 5.0% |
 | DSP Blocks | 2 | 80 | 2.5% |
 
 Leaves 75% of LUTs and 95% of BRAM free for downstream logic.

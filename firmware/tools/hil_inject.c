@@ -238,12 +238,14 @@ static int hil_inject_and_capture(int n_samples, long long rate_hz,
                                   uint32_t snap_buf[SNAP_DEPTH],
                                   bool quiet)
 {
+    int rc = -1;
+
     /* 1. Enable test mode (mux selects DDR playback). The select is
      *    registered on the ADC strobe, so wait for it to latch. */
     hal_reg_write(REG_HIL_CTRL_CONTROL, HIL_CTRL_TEST_MODE);
     if (styx_wait_adc_strobes(2, 100) != 0) {
         fprintf(stderr, "ERROR: test mode did not latch on an ADC strobe\n");
-        return -1;
+        goto fail;
     }
 
     /* 2. Configure playback: base address + sample count */
@@ -284,11 +286,11 @@ static int hil_inject_and_capture(int n_samples, long long rate_hz,
 
     if (wait_reg_set(REG_SNAP_STATUS, 0x01, snap_timeout_ms,
                      "snap capture", quiet) != 0)
-        return -1;
+        goto fail;
 
     if (wait_reg_set(REG_HIL_CTRL_STATUS, 0x02, play_timeout_ms,
                      "playback done", quiet) != 0)
-        return -1;
+        goto fail;
 
     uint32_t underrun = hal_reg_read(REG_HIL_CTRL_UNDERRUN);
     uint32_t played = hal_reg_read(REG_HIL_CTRL_PLAY_PTR);
@@ -296,8 +298,7 @@ static int hil_inject_and_capture(int n_samples, long long rate_hz,
         fprintf(stderr,
                 "ERROR: HIL playback underrun=%u, played=%u/%d\n",
                 underrun, played, n_samples);
-        hal_reg_write(REG_HIL_CTRL_CONTROL, 0);
-        return -1;
+        goto fail;
     }
 
     /* 7. Read snap buffer (1024 entries) */
@@ -307,10 +308,12 @@ static int hil_inject_and_capture(int n_samples, long long rate_hz,
         snap_buf[i] = hal_reg_read(REG_SNAP_RD_DATA);
     }
 
-    /* 8. Disable test mode */
-    hal_reg_write(REG_HIL_CTRL_CONTROL, 0);
+    rc = 0;
 
-    return 0;
+fail:
+    /* Leave the mux on the live ADC path, even on error. */
+    hal_reg_write(REG_HIL_CTRL_CONTROL, 0);
+    return rc;
 }
 
 /* --------------------------------------------------------------------------
@@ -450,8 +453,8 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    /* The ADC is the HIL timebase. Read its rate and prove the strobe
-     * is advancing before we touch playback. */
+    /* Start from a known mux state, then prove the ADC is streaming. */
+    hal_reg_write(REG_HIL_CTRL_CONTROL, 0);
     long long rate_hz = styx_wait_adc_stream(100);
     if (rate_hz <= 0) {
         free(re); free(im);

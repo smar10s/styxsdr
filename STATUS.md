@@ -22,15 +22,13 @@ Hardware evidence:
 
 # Next Steps
 
-1. Deimos `hil/follow-adc-rate`: pin this Styx tip, add the ADC
-   preflight tool, update tests, and run the HIL regression.
-2. Push this branch when asked.
+1. Human merges this branch to `main`.
+2. Deimos repins to `main`, reruns `merge_check.sh`, and merges.
 3. Neso repin after the Styx merge to `main`.
 
 # Known Issues
 
-- The underrun counter is proven in sim, not forced on hardware.
+- The underrun counter is proven in sim. It was not forced on StyX or
+  Deimos hardware.
 - `pluto_stream_test` still fails its ARM feed-rate check at 20 MSPS.
   That is the known host-feed limit, not an ADC or HIL failure.
-- Deimos HIL does not configure the ADC yet; its preflight tool is the
-  remaining piece before its regression can run.
