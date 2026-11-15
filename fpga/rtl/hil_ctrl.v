@@ -426,10 +426,12 @@ module hil_ctrl #(
     reg        play_started;
 
     always @(posedge clk) begin
+        // Unconditional read: keeps the FIFO inferable as block RAM.
+        test_re <= fifo[rd_addr][11:0];
+        test_im <= fifo[rd_addr][23:12];
+
         if (rst) begin
             test_valid     <= 0;
-            test_re        <= 0;
-            test_im        <= 0;
             rd_ptr         <= 0;
             play_ptr       <= 0;
             play_started   <= 0;
@@ -450,8 +452,6 @@ module hil_ctrl #(
             if (adc_valid && playback_active && play_started) begin
                 if (!empty) begin
                     test_valid <= 1;
-                    test_re    <= fifo[rd_addr][11:0];
-                    test_im    <= fifo[rd_addr][23:12];
                     rd_ptr     <= rd_ptr + 1;
                     play_ptr   <= play_ptr + 1;
                 end else begin
