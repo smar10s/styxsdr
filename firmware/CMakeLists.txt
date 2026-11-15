@@ -28,6 +28,9 @@ if(NOT STYX_HOST_BUILD)
     add_executable(hil_inject tools/hil_inject.c)
     target_link_libraries(hil_inject PRIVATE styx_tool)
 
+    add_executable(adc_preflight tools/adc_preflight.c)
+    target_link_libraries(adc_preflight PRIVATE styx_tool)
+
     add_executable(pluto_dma_test tools/platform/pluto_dma_test.c)
     target_link_libraries(pluto_dma_test PRIVATE styx_tool)
 

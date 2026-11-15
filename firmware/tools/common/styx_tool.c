@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "hal.h"
@@ -159,6 +160,54 @@ int styx_rf_configure(const styx_rf_config_t *cfg)
 }
 
 /* ==========================================================================
+ * ADC stream preflight
+ * ========================================================================== */
+
+static uint64_t monotonic_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)ts.tv_nsec / 1000000ULL;
+}
+
+int styx_wait_adc_strobes(uint32_t count, uint32_t timeout_ms)
+{
+    if (timeout_ms == 0)
+        timeout_ms = 100;
+
+    uint32_t start = hal_reg_read(REG_HIL_CTRL_ADC_CNT);
+    uint64_t deadline = monotonic_ms() + timeout_ms;
+    uint32_t seen = 0;
+
+    for (;;) {
+        uint32_t cur = hal_reg_read(REG_HIL_CTRL_ADC_CNT);
+        seen = cur - start;
+        if (seen >= count)
+            return 0;
+        if (monotonic_ms() >= deadline)
+            break;
+        usleep(1000);
+    }
+
+    fprintf(stderr,
+            "styx: ADC strobe is not advancing (ADC_CNT +%u in %u ms)\n",
+            seen, timeout_ms);
+    return -1;
+}
+
+long long styx_wait_adc_stream(uint32_t timeout_ms)
+{
+    long long rate = hal_ad9361_get_sample_rate();
+    if (rate <= 0) {
+        fprintf(stderr, "styx: cannot read the ADC sample rate\n");
+        return -1;
+    }
+    if (styx_wait_adc_strobes(2, timeout_ms) != 0)
+        return -1;
+    return rate;
+}
+
+/* ==========================================================================
  * TX-and-capture (loopback pattern)
  * ========================================================================== */
 
@@ -202,10 +251,20 @@ int styx_tx_and_capture(const styx_capture_cfg_t *cfg,
         return -1;
     }
 
-    /* Wait for TX to complete + propagation margin */
+    /* Wait for TX to complete + propagation margin. */
+    long long rate = hal_ad9361_get_sample_rate();
+    if (rate <= 0) {
+        fprintf(stderr, "styx_tx_and_capture: cannot read the sample rate\n");
+        dma_tx_stop();
+        dma_rx_stop();
+        free(*out_re); free(*out_im);
+        *out_re = NULL; *out_im = NULL;
+        return -1;
+    }
     uint32_t extra = cfg->extra_wait_us ? cfg->extra_wait_us : 2000;
-    unsigned int tx_us = (unsigned int)(cfg->tx_samples / 20);  /* 20 samples/us @ 20 MSPS */
-    usleep(tx_us + extra);
+    uint64_t tx_us64 = ((uint64_t)cfg->tx_samples * 1000000ULL +
+                        (uint64_t)rate - 1ULL) / (uint64_t)rate;
+    usleep((unsigned int)tx_us64 + extra);
 
     /* Verify enough data captured since t0 */
     uint32_t cur = dma_rx_wr_ptr();

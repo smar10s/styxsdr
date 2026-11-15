@@ -22,6 +22,8 @@
  *     0x08 DDR_BASE   Physical base of test waveform
  *     0x0C PLAY_COUNT Number of samples
  *     0x10 PLAY_PTR   Current position (RO)
+ *     0x14 UNDERRUN   Sticky underrun count (write 1 to clear)
+ *     0x3C ADC_CNT    ADC strobe counter
  *
  *   snap_axi @ 0x7C4E0000:
  *     0x00 CONTROL    [0]=arm, [1]=sw_trigger
@@ -37,6 +39,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <math.h>
+#include <time.h>
 #include <getopt.h>
 
 #include "hal.h"
@@ -201,19 +204,54 @@ static void quantize_and_write(const float *re, const float *im, int n_samples,
 }
 
 /* --------------------------------------------------------------------------
+ * Deadlines
+ * -------------------------------------------------------------------------- */
+
+static uint64_t monotonic_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)ts.tv_nsec / 1000000ULL;
+}
+
+static int wait_reg_set(uint32_t addr, uint32_t mask, uint32_t timeout_ms,
+                        const char *what, bool quiet)
+{
+    uint64_t deadline = monotonic_ms() + timeout_ms;
+    for (;;) {
+        if (hal_reg_read(addr) & mask)
+            return 0;
+        if (monotonic_ms() >= deadline)
+            break;
+        usleep(1000);
+    }
+    if (!quiet)
+        fprintf(stderr, "ERROR: timeout waiting for %s\n", what);
+    return -1;
+}
+
+/* --------------------------------------------------------------------------
  * HIL inject + snap capture
  * -------------------------------------------------------------------------- */
 
-static int hil_inject_and_capture(int n_samples, uint32_t snap_buf[SNAP_DEPTH],
-                                   bool quiet)
+static int hil_inject_and_capture(int n_samples, long long rate_hz,
+                                  uint32_t snap_buf[SNAP_DEPTH],
+                                  bool quiet)
 {
-    /* 1. Enable test mode (mux selects DDR playback) */
+    /* 1. Enable test mode (mux selects DDR playback). The select is
+     *    registered on the ADC strobe, so wait for it to latch. */
     hal_reg_write(REG_HIL_CTRL_CONTROL, HIL_CTRL_TEST_MODE);
-    usleep(100);
+    if (styx_wait_adc_strobes(2, 100) != 0) {
+        fprintf(stderr, "ERROR: test mode did not latch on an ADC strobe\n");
+        return -1;
+    }
 
     /* 2. Configure playback: base address + sample count */
     hal_reg_write(REG_HIL_CTRL_DDR_BASE, HIL_DDR_BASE);
     hal_reg_write(REG_HIL_CTRL_PLAY_COUNT, (uint32_t)n_samples);
+
+    /* Clear the sticky underrun counter from any earlier run. */
+    hal_reg_write(REG_HIL_CTRL_UNDERRUN, 1);
 
     /* 3. Arm snap probe (clear stale state, then arm) */
     hal_reg_write(REG_SNAP_CONTROL, 0);
@@ -231,39 +269,45 @@ static int hil_inject_and_capture(int n_samples, uint32_t snap_buf[SNAP_DEPTH],
     /* 4. Trigger playback (W1S on bit 1, keep test_mode=1) */
     hal_reg_write(REG_HIL_CTRL_CONTROL, HIL_CTRL_TEST_MODE | HIL_CTRL_TRIGGER);
 
-    /* 5. Immediately sw-trigger the snap.
-     *    Playback emits 1 sample per 5 clocks (20 MSPS in 100 MHz fabric).
-     *    Total playback = n_samples * 50ns. For 1024 samples = 51.2 us.
-     *    POST_DEPTH = 512, so snap completes after 512 * 50ns = 25.6 us.
-     *    We must trigger before sample 512. The AXI register write itself
-     *    takes ~10 clocks, so triggering snap immediately after playback
-     *    trigger ensures we catch the very first samples. */
+    /* 5. Immediately sw-trigger the snap. Playback starts on the next
+     *    ADC strobe after the FIFO fills, so the snap is armed well
+     *    before the first sample. */
     hal_reg_write(REG_SNAP_CONTROL, SNAP_CTRL_ARM | SNAP_CTRL_SWTRIG);
 
-    /* 6. Wait for playback + snap to complete.
-     *    Snap needs 512 sample_valid ticks = 25.6 us.
-     *    Playback needs 1024 ticks = 51.2 us for full drain.
-     *    Both will be done well within 1 ms. */
-    usleep(1000);
+    /* 6. Wait for snap and playback with sample-rate-derived deadlines. */
+    uint64_t play_us = ((uint64_t)n_samples * 1000000ULL +
+                        (uint64_t)rate_hz - 1ULL) / (uint64_t)rate_hz;
+    uint64_t snap_us = ((uint64_t)SNAP_POST_DEPTH * 1000000ULL +
+                        (uint64_t)rate_hz - 1ULL) / (uint64_t)rate_hz;
+    uint32_t play_timeout_ms = (uint32_t)((play_us + 999ULL) / 1000ULL) + 50;
+    uint32_t snap_timeout_ms = (uint32_t)((snap_us + 999ULL) / 1000ULL) + 50;
 
-    /* 7. Verify snap capture completed.
-     *    With 1024 playback samples and POST_DEPTH=512, snap should be done
-     *    well before playback ends. */
-    usleep(100);
-    snap_status = hal_reg_read(REG_SNAP_STATUS);
-    if (!(snap_status & 0x01)) {
-        fprintf(stderr, "ERROR: Snap capture failed (status=0x%08x)\n", snap_status);
+    if (wait_reg_set(REG_SNAP_STATUS, 0x01, snap_timeout_ms,
+                     "snap capture", quiet) != 0)
+        return -1;
+
+    if (wait_reg_set(REG_HIL_CTRL_STATUS, 0x02, play_timeout_ms,
+                     "playback done", quiet) != 0)
+        return -1;
+
+    uint32_t underrun = hal_reg_read(REG_HIL_CTRL_UNDERRUN);
+    uint32_t played = hal_reg_read(REG_HIL_CTRL_PLAY_PTR);
+    if (underrun != 0 || played != (uint32_t)n_samples) {
+        fprintf(stderr,
+                "ERROR: HIL playback underrun=%u, played=%u/%d\n",
+                underrun, played, n_samples);
+        hal_reg_write(REG_HIL_CTRL_CONTROL, 0);
         return -1;
     }
 
-    /* 8. Read snap buffer (1024 entries) */
+    /* 7. Read snap buffer (1024 entries) */
     for (int i = 0; i < SNAP_DEPTH; i++) {
         hal_reg_write(REG_SNAP_RD_ADDR, (uint32_t)i);
         usleep(1);  /* allow BRAM latency */
         snap_buf[i] = hal_reg_read(REG_SNAP_RD_DATA);
     }
 
-    /* 9. Disable test mode */
+    /* 8. Disable test mode */
     hal_reg_write(REG_HIL_CTRL_CONTROL, 0);
 
     return 0;
@@ -331,6 +375,8 @@ static void usage(const char *prog) {
         "\n"
         "  Inject IQ waveform via HIL controller and read snap buffer.\n"
         "  Proves: hil_ctrl mux works, snap probe captures correctly.\n"
+        "  Requires a streaming ADC. The rate is read from the AD9361;\n"
+        "  use adc_preflight to set it.\n"
         "\n"
         "Options:\n"
         "  -c <hz>    Apply CFO (frequency offset) before injection\n"
@@ -383,10 +429,6 @@ int main(int argc, char *argv[])
     if (load_waveform(waveform_path, &re, &im, &n_samples) != 0)
         return 1;
 
-    if (!quiet)
-        fprintf(stderr, "  Samples: %d (%.2f ms at 20 MSPS)\n",
-                n_samples, n_samples / 20000.0);
-
     if (n_samples > HIL_MAX_SAMPLES) {
         fprintf(stderr, "ERROR: Waveform too large (%d > %d samples)\n",
                 n_samples, HIL_MAX_SAMPLES);
@@ -394,9 +436,37 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    /* Apply CFO if requested (rotate IQ by cfo_hz at 20 MSPS) */
+    if (n_samples < SNAP_POST_DEPTH) {
+        fprintf(stderr, "ERROR: Waveform too short (%d < %d samples)\n",
+                n_samples, SNAP_POST_DEPTH);
+        free(re); free(im);
+        return 1;
+    }
+
+    /* Initialize HAL */
+    if (hal_init() != 0) {
+        fprintf(stderr, "ERROR: hal_init failed\n");
+        free(re); free(im);
+        return 1;
+    }
+
+    /* The ADC is the HIL timebase. Read its rate and prove the strobe
+     * is advancing before we touch playback. */
+    long long rate_hz = styx_wait_adc_stream(100);
+    if (rate_hz <= 0) {
+        free(re); free(im);
+        hal_cleanup();
+        return 1;
+    }
+
+    if (!quiet)
+        fprintf(stderr, "  Samples: %d (%.2f ms at %.2f MSPS)\n",
+                n_samples, (double)n_samples * 1000.0 / (double)rate_hz,
+                (double)rate_hz / 1e6);
+
+    /* Apply CFO if requested (rotate IQ at the configured rate) */
     if (cfo_hz != 0.0) {
-        double sample_rate = 20e6;
+        double sample_rate = (double)rate_hz;
         double phase_inc = 2.0 * M_PI * cfo_hz / sample_rate;
         if (!quiet)
             fprintf(stderr, "  Applying CFO: %.1f Hz (%.6f rad/sample)\n",
@@ -412,13 +482,6 @@ int main(int argc, char *argv[])
         }
     }
 
-    /* Initialize HAL */
-    if (hal_init() != 0) {
-        fprintf(stderr, "ERROR: hal_init failed\n");
-        free(re); free(im);
-        return 1;
-    }
-
     /* Get DDR TX buffer pointer and offset to HIL region */
     volatile uint32_t *tx_buf = hal_ddr_tx_buf();
     volatile uint32_t *hil_buf = tx_buf + (HIL_DDR_BASE - DDR_TX_BASE) / 4;
@@ -428,6 +491,12 @@ int main(int argc, char *argv[])
     uint32_t *expected = NULL;
     if (verify || check_watermark)
         expected = malloc(n_samples * sizeof(uint32_t));
+    if ((verify || check_watermark) && expected == NULL) {
+        fprintf(stderr, "ERROR: cannot allocate verification buffer\n");
+        free(re); free(im);
+        hal_cleanup();
+        return 1;
+    }
 
     if (!quiet)
         fprintf(stderr, "Quantizing to 12-bit and writing to DDR @ 0x%08X...\n",
@@ -440,7 +509,7 @@ int main(int argc, char *argv[])
         fprintf(stderr, "Triggering HIL playback (%d samples)...\n", n_samples);
 
     uint32_t snap_buf[SNAP_DEPTH];
-    if (hil_inject_and_capture(n_samples, snap_buf, quiet) != 0) {
+    if (hil_inject_and_capture(n_samples, rate_hz, snap_buf, quiet) != 0) {
         free(expected);
         hal_cleanup();
         return 1;

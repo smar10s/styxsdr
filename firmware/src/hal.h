@@ -55,7 +55,8 @@
 #define REG_HIL_CTRL_DDR_BASE  (REG_HIL_CTRL_BASE + 0x08)
 #define REG_HIL_CTRL_PLAY_COUNT (REG_HIL_CTRL_BASE + 0x0C)
 #define REG_HIL_CTRL_PLAY_PTR  (REG_HIL_CTRL_BASE + 0x10)
-/* 0x14–0x38: reserved for downstream extension registers */
+#define REG_HIL_CTRL_UNDERRUN  (REG_HIL_CTRL_BASE + 0x14)
+/* 0x18–0x38: reserved for downstream extension registers */
 #define REG_HIL_CTRL_ADC_CNT   (REG_HIL_CTRL_BASE + 0x3C)
 
 /* Accelerator register regions (semantics depend on bitstream PROJECT_ID).

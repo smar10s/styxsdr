@@ -226,8 +226,13 @@ Golden waveform injection without RF. `hil_ctrl` switches the IQ mux
 from the live ADC to DDR playback, paced by the ADC sample strobe:
 
 ```bash
-hil_inject -v -w    # load hil_golden.json, verify watermark, capture snap
+adc_preflight -r 20000000   # set the rate and prove the ADC is streaming
+hil_inject -v -w            # load hil_golden.json, verify, capture snap
 ```
+
+`hil_inject` never sets the rate. It reads it from the AD9361 and fails
+loudly if the ADC strobe is not advancing. `adc_preflight` is the one
+place that may set the rate.
 
 `firmware/vectors/hil_golden.json` is a 1024-sample vector: a 3-sample
 ASCII watermark, then a 0.5–9.5 MHz chirp.

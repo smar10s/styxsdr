@@ -55,6 +55,20 @@ typedef struct {
 int styx_rf_configure(const styx_rf_config_t *cfg);
 
 /* --------------------------------------------------------------------------
+ * ADC stream preflight
+ *
+ * Reads the configured sample rate and checks that the ADC strobe is
+ * advancing. HAL must be initialized first.
+ *
+ * styx_wait_adc_strobes waits for `count` new ADC_CNT increments.
+ * styx_wait_adc_stream also returns the sample rate, or -1 when the rate
+ * cannot be read or no strobe arrives before the deadline.
+ * -------------------------------------------------------------------------- */
+
+int styx_wait_adc_strobes(uint32_t count, uint32_t timeout_ms);
+long long styx_wait_adc_stream(uint32_t timeout_ms);
+
+/* --------------------------------------------------------------------------
  * Two-phase TX-and-capture (loopback pattern)
  *
  * 1. Start RX DMA
