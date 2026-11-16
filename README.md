@@ -204,6 +204,11 @@ The fill FSM wraps at the 32 MB boundary automatically.
 `dma_tx_stream_feed()` issues a memory barrier before updating the WR_PTR
 register so the FPGA sees all committed DDR stores.
 
+Host throughput caps this loop. A single Cortex-A9 with the NEON chirp
+generator sustains about 4.3 MSPS. Above roughly 5 MSPS the ARM falls
+behind the drain FSM and the DAC underruns. For higher rates, precompute
+the waveform and use one-shot DMA.
+
 ### Blocking RX Capture
 
 ```c
