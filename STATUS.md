@@ -35,22 +35,19 @@ Pluto had an antenna on instead of the loopback cable.
 
 # Next Steps
 
-1. Deimos session, pinned to this branch:
-   - Delete the `iic_*` and `pl_spi_*` wiring in its own `system_top.v`
-     (copy this branch's).
-   - Add `i2c@41600000` disabled to `deimos-pluto.dtso`, and add the
-     Rev.C fdtput to its packaging, if it has its own.
-   - Record WNS for at least two placement strategies, before and after.
-   - Run its gates: loopback through OTA.
-2. shesha: repin Styx to this branch for the new `hal.c`. Drop the
-   hardcoded `iio:device1` in `client/tests/hardware/test_fm_tx_stop.py`.
-   Then run shesha on Deimos as the final manual test.
-3. Merge to `main` once Deimos is green. Then repin Neso.
+1. Deimos (`trim/pl-header-peripherals`, pinned to `5739a64`):
+   - Done: build `0x77280121`, timing MET, WNS +0.290, 14,749 LUT (was
+     15,591). A second placement strategy also meets timing.
+   - Done: `session_end.sh` passes on cable loopback.
+   - Left: the OTA gate, which needs the antenna.
+2. shesha (`trim/pl-header-peripherals`, pinned to `5739a64`):
+   - Done: the test no longer hardcodes `iio:device1`.
+   - Done: hardware suite 48/48 on Deimos, cable loopback.
+   - Left: the manual test, with the antenna.
+3. Push this branch, then Deimos and shesha. Merge to `main` once Deimos
+   is green, then repin Neso.
 
 # Known Issues
 
 - The ADM1177 input power and current readings are gone.
-- `make firmware` fails in `build/firmware`. Another account's stale
-  cmake files there are not writable. Building with
-  `FW_BUILD_DIR=build/firmware-gri` works.
 - `make sim` needs `.venv/bin` on `PATH` to find `cocotb-config`.
