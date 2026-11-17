@@ -7,8 +7,7 @@ its gates on this branch.
 
 # Status
 
-The change is complete. On hardware it boots and passes the
-non-RF gates.
+The change is complete and passes every Styx hardware gate.
 - BD: both cores, their ports, interrupts and interconnect slots are gone.
   `system_top.v` keeps the phaser mux; the freed SPI/I2C pins idle.
 - Device tree: the overlay disables `i2c@41600000` in all three DTBs.
@@ -25,35 +24,31 @@ Hardware, Rev.B Pluto:
 - `pluto_ad9361_readback`: 3/3 pass.
 - `pluto_dma_test`: 7/7 pass.
 - HIL golden vector: pass at 20 and 30.72 MSPS.
+- `hardware_baseline.sh` on cable loopback passes 9/9:
+  - signal ladder L6/6
+  - 5180 MHz: 80/80 frames
+  - 915 MHz: 79/80 frames
+  - 12 s streaming TX: 0 dropouts, 0 stalls
 
-RF loopback fails, but not because of this change. The same tools fail
-the same way on the previous bitstream (`0x5f4eba83`, both cores
-present):
-- Sigladder L1 fails on energy at 5180 and 915 MHz.
-- `pluto_loopback` passes only the low rates.
-- The bench cabling or attenuation has likely changed since the
-  September baseline.
+An earlier run failed RF on this and the previous bitstream alike. The
+Pluto had an antenna on instead of the loopback cable.
 
 # Next Steps
 
-1. Restore the RF bench, then rerun `scripts/hardware_baseline.sh` on
-   this branch.
-2. Deimos session, pinned to this branch:
+1. Deimos session, pinned to this branch:
    - Delete the `iic_*` and `pl_spi_*` wiring in its own `system_top.v`
      (copy this branch's).
    - Add `i2c@41600000` disabled to `deimos-pluto.dtso`, and add the
      Rev.C fdtput to its packaging, if it has its own.
    - Record WNS for at least two placement strategies, before and after.
    - Run its gates: loopback through OTA.
-3. shesha: repin Styx to this branch for the new `hal.c`. Drop the
+2. shesha: repin Styx to this branch for the new `hal.c`. Drop the
    hardcoded `iio:device1` in `client/tests/hardware/test_fm_tx_stop.py`.
    Then run shesha on Deimos as the final manual test.
-4. Merge to `main` once Deimos is green. Then repin Neso.
+3. Merge to `main` once Deimos is green. Then repin Neso.
 
 # Known Issues
 
-- RF loopback fails on both bitstreams. See Status; it's a bench issue,
-  not RTL.
 - The ADM1177 input power and current readings are gone.
 - `make firmware` fails in `build/firmware`. Another account's stale
   cmake files there are not writable. Building with
