@@ -27,8 +27,6 @@
 #include "hal.h"
 #include "styx_tool.h"
 
-#define AD9361_IIO_PATH "/sys/bus/iio/devices/iio:device1/"
-
 static int tests_run = 0;
 static int tests_passed = 0;
 
@@ -54,8 +52,10 @@ static int tests_passed = 0;
 /* Read a sysfs attribute directly, bypassing the HAL, to cross-check. */
 static long long read_raw(const char *attr)
 {
-    char path[128];
-    snprintf(path, sizeof(path), AD9361_IIO_PATH "%s", attr);
+    char path[160];
+    const char *dir = hal_ad9361_iio_dir();
+    if (!dir) return -1;
+    snprintf(path, sizeof(path), "%s%s", dir, attr);
     FILE *f = fopen(path, "r");
     if (!f) return -1;
     long long v = 0;

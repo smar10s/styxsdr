@@ -59,14 +59,6 @@ create_bd_port -dir I -from 17 -to 0 gpio_i
 create_bd_port -dir O -from 17 -to 0 gpio_o
 create_bd_port -dir O -from 17 -to 0 gpio_t
 
-create_bd_port -dir O spi_csn_o
-create_bd_port -dir I spi_csn_i
-create_bd_port -dir I spi_clk_i
-create_bd_port -dir O spi_clk_o
-create_bd_port -dir I spi_sdo_i
-create_bd_port -dir O spi_sdo_o
-create_bd_port -dir I spi_sdi_i
-
 create_bd_port -dir O txdata_o
 create_bd_port -dir I tdd_ext_sync
 
@@ -133,13 +125,6 @@ ad_ip_parameter sys_rstgen CONFIG.C_EXT_RST_WIDTH 1
 
 # system reset/clock definitions
 
-# add external spi
-
-ad_ip_instance axi_quad_spi axi_spi
-ad_ip_parameter axi_spi CONFIG.C_USE_STARTUP 0
-ad_ip_parameter axi_spi CONFIG.C_NUM_SS_BITS 1
-ad_ip_parameter axi_spi CONFIG.C_SCK_RATIO 8
-
 ad_connect  sys_cpu_clk sys_ps7/FCLK_CLK0
 ad_connect  sys_200m_clk sys_ps7/FCLK_CLK1
 ad_connect  sys_cpu_reset sys_rstgen/peripheral_reset
@@ -167,17 +152,6 @@ ad_connect  spi0_sdo_i sys_ps7/SPI0_MOSI_I
 ad_connect  spi0_sdo_o sys_ps7/SPI0_MOSI_O
 ad_connect  spi0_sdi_i sys_ps7/SPI0_MISO_I
 
-# axi spi connections
-
-ad_connect  sys_cpu_clk  axi_spi/ext_spi_clk
-ad_connect  spi_csn_i  axi_spi/ss_i
-ad_connect  spi_csn_o  axi_spi/ss_o
-ad_connect  spi_clk_i  axi_spi/sck_i
-ad_connect  spi_clk_o  axi_spi/sck_o
-ad_connect  spi_sdo_i  axi_spi/io0_i
-ad_connect  spi_sdo_o  axi_spi/io0_o
-ad_connect  spi_sdi_i  axi_spi/io1_i
-
 # interrupts
 
 ad_connect  sys_concat_intc/dout sys_ps7/IRQ_F2P
@@ -198,15 +172,11 @@ ad_connect  sys_concat_intc/In2 GND
 ad_connect  sys_concat_intc/In1 GND
 ad_connect  sys_concat_intc/In0 GND
 
-# iic
-
-create_bd_intf_port -mode Master -vlnv xilinx.com:interface:iic_rtl:1.0 iic_main
-
-ad_ip_instance axi_iic axi_iic_main
-
-ad_connect  iic_main axi_iic_main/iic
-ad_cpu_interconnect 0x41600000 axi_iic_main
-ad_cpu_interrupt ps-15 mb-15 axi_iic_main/iic2intc_irpt
+# The ADI reference design also has axi_quad_spi (0x7C430000) and axi_iic
+# (0x41600000) on the PL expansion header. The I2C core carries only the
+# ADM1177 power monitor. Styx drops both: no Styx user needs them, and
+# together they cost ~900 LUTs. The device tree overlay disables their
+# nodes. To restore them, revert the commit that removed them.
 
 # ==========================================================================
 # AD9361 Core
@@ -301,7 +271,6 @@ ad_connect sys_cpu_resetn axi_build_id_0/s_axi_aresetn
 # ---- AXI interconnects ----
 
 ad_cpu_interconnect 0x79020000 axi_ad9361
-ad_cpu_interconnect 0x7C430000 axi_spi
 ad_cpu_interconnect 0x43C00000 axi_build_id_0
 
 # ==========================================================================
@@ -505,4 +474,3 @@ create_bd_addr_seg -range 0x1000 -offset 0x7C4E0000 \
 # Interrupts
 # ==========================================================================
 
-ad_cpu_interrupt ps-11 mb-11 axi_spi/ip2intc_irpt

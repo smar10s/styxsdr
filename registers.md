@@ -6,7 +6,6 @@
 |------------|--------------|--------------------------|
 | 0x43C00000 | axi_build_id | Build fingerprint (RO)   |
 | 0x79020000 | axi_ad9361   | RF PHY control           |
-| 0x7C430000 | axi_spi      | External SPI             |
 | 0x7C4B0000 | iq_dma_rx    | RX DMA control           |
 | 0x7C4D0000 | iq_dma_tx    | TX DMA control           |
 | 0x7C4E0000 | snap_axi     | Debug snap probe         |
@@ -20,6 +19,11 @@
 | 0x18000000  | 32 MB  | TX / HIL playback / stream |
 
 160 MB total reserved by device tree overlay at 0x10000000.
+
+The ADI reference design also has a PL SPI core at 0x7C430000 and a PL I2C
+core at 0x41600000 (ADM1177 power monitor). Styx removes both; the device
+tree overlay disables their nodes. Find the AD9361 IIO device by its name
+(`ad9361-phy`): its `iio:deviceN` index is not fixed.
 
 ### IQ Sample Packing
 

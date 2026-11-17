@@ -10,6 +10,7 @@ void hal_cleanup(void) {}
 uint32_t hal_reg_read(uint32_t addr)     { (void)addr; return 0; }
 void hal_reg_write(uint32_t addr, uint32_t val) { (void)addr; (void)val; }
 
+const char *hal_ad9361_iio_dir(void)               { return NULL; }
 int hal_ad9361_set_rx_lo(uint64_t freq_hz)         { (void)freq_hz; return 0; }
 int hal_ad9361_set_tx_lo(uint64_t freq_hz)         { (void)freq_hz; return 0; }
 int hal_ad9361_set_sample_rate(uint64_t rate_hz)   { (void)rate_hz; return 0; }
