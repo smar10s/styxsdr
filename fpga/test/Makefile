@@ -232,6 +232,14 @@ endif
 
 # ---- cocotb include ----
 
+# Use the repo's virtualenv if it has cocotb, so it need not be activated.
+VENV ?= $(abspath ../../.venv)
+ifneq ($(wildcard $(VENV)/bin/cocotb-config),)
+export PATH := $(VENV)/bin:$(PATH)
+endif
+
 ifneq ($(shell which cocotb-config 2>/dev/null),)
 include $(shell cocotb-config --makefiles)/Makefile.sim
+else
+$(warning cocotb not found: sim targets unavailable. Create $(VENV) or activate a venv with cocotb)
 endif

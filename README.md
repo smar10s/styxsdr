@@ -4,7 +4,7 @@
 [PlutoSDR](https://www.analog.com/en/resources/evaluation-hardware-and-software/evaluation-boards-kits/adalm-pluto.html)
 (Xilinx Zynq 7010). It replaces the stock ADI IIO/DMA framework with
 custom streaming DMA engines: continuous IQ capture, deterministic
-playback, HIL injection, and a debug probe. ~4.4k LUTs and 2 DSPs leave
+playback, HIL injection, and a debug probe. ~3.5k LUTs and 2 DSPs leave
 most of the Z-7010 for downstream logic. Projects source
 `fpga/project/system_bd.tcl`, connect to the post-mux IQ stream, and link
 the firmware HAL.
@@ -276,12 +276,16 @@ Post-route, Vivado 2025.2, Zynq 7010:
 
 | Resource | Used | Available | % |
 |---|---|---|---|
-| Slice LUTs | 4,369 | 17,600 | 24.8% |
-| Slice Registers | 6,535 | 35,200 | 18.6% |
-| Block RAM Tiles | 3 (incl. 1 RAMB18) | 60 | 5.0% |
+| Slice LUTs | 3,489 | 17,600 | 19.8% |
+| Slice Registers | 5,492 | 35,200 | 15.6% |
+| Block RAM Tiles | 3.5 (3 RAMB36 + 1 RAMB18) | 60 | 5.8% |
 | DSP Blocks | 2 | 80 | 2.5% |
 
-Leaves 75% of LUTs and 95% of BRAM free for downstream logic.
+Leaves 80% of LUTs and 94% of BRAM free for downstream logic.
+
+The ADI reference design's PL expansion-header SPI and I2C cores are not
+included; they cost ~900 LUTs and no Styx user needs them. Restore them by
+reverting the commit that removed them, along with its device tree change.
 
 ## Project Layout
 

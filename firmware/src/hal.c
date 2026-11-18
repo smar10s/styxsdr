@@ -18,7 +18,8 @@
 #define PAGE_SIZE           4096
 #define REG_REGION_SIZE     PAGE_SIZE   /* each register block fits in one page */
 
-#define AD9361_IIO_PATH     "/sys/bus/iio/devices/iio:device1/"
+#define IIO_DEVICES_DIR     "/sys/bus/iio/devices/"
+#define AD9361_IIO_NAME     "ad9361-phy"
 
 /* --------------------------------------------------------------------------
  * Internal state
@@ -83,6 +84,50 @@ static long long sysfs_read_ll(const char *path)
         val = -1;
     fclose(f);
     return val;
+}
+
+/* --------------------------------------------------------------------------
+ * AD9361 IIO device lookup
+ *
+ * IIO numbers devices in probe order, which depends on the bitstream and
+ * device tree. So the AD9361 is found by name, not by a fixed index.
+ * -------------------------------------------------------------------------- */
+
+static char ad9361_dir[64];
+
+const char *hal_ad9361_iio_dir(void)
+{
+    if (ad9361_dir[0])
+        return ad9361_dir;
+    for (int i = 0; i < 16; i++) {
+        char path[96];
+        char name[32] = {0};
+        snprintf(path, sizeof(path), IIO_DEVICES_DIR "iio:device%d/name", i);
+        FILE *f = fopen(path, "r");
+        if (!f)
+            continue;
+        if (fgets(name, sizeof(name), f))
+            name[strcspn(name, "\n")] = 0;
+        fclose(f);
+        if (strcmp(name, AD9361_IIO_NAME) == 0) {
+            snprintf(ad9361_dir, sizeof(ad9361_dir),
+                     IIO_DEVICES_DIR "iio:device%d/", i);
+            return ad9361_dir;
+        }
+    }
+    fprintf(stderr, "hal: no IIO device named %s\n", AD9361_IIO_NAME);
+    return NULL;
+}
+
+/* Full sysfs path of one AD9361 attribute. Returns a path that fails to
+ * open if the device is missing, so callers report the error as usual. */
+static const char *ad9361_path(const char *attr)
+{
+    static char path[160];
+    const char *dir = hal_ad9361_iio_dir();
+    snprintf(path, sizeof(path), "%s%s",
+             dir ? dir : IIO_DEVICES_DIR "missing-" AD9361_IIO_NAME "/", attr);
+    return path;
 }
 
 /* --------------------------------------------------------------------------
@@ -370,7 +415,7 @@ volatile uint32_t *hal_ddr_tx_buf(void)
 
 int hal_ad9361_set_rx_lo(uint64_t freq_hz)
 {
-    const char *path = AD9361_IIO_PATH "out_altvoltage0_RX_LO_frequency";
+    const char *path = ad9361_path("out_altvoltage0_RX_LO_frequency");
     int rc = sysfs_write_ll(path, (long long)freq_hz);
     if (rc == 0) {
         long long actual = sysfs_read_ll(path);
@@ -385,7 +430,7 @@ int hal_ad9361_set_rx_lo(uint64_t freq_hz)
 
 int hal_ad9361_set_tx_lo(uint64_t freq_hz)
 {
-    const char *path = AD9361_IIO_PATH "out_altvoltage1_TX_LO_frequency";
+    const char *path = ad9361_path("out_altvoltage1_TX_LO_frequency");
     int rc = sysfs_write_ll(path, (long long)freq_hz);
     if (rc == 0) {
         long long actual = sysfs_read_ll(path);
@@ -400,7 +445,7 @@ int hal_ad9361_set_tx_lo(uint64_t freq_hz)
 
 int hal_ad9361_set_sample_rate(uint64_t rate_hz)
 {
-    const char *path = AD9361_IIO_PATH "in_voltage_sampling_frequency";
+    const char *path = ad9361_path("in_voltage_sampling_frequency");
     int rc = sysfs_write_ll(path, (long long)rate_hz);
     if (rc == 0) {
         long long actual = sysfs_read_ll(path);
@@ -415,13 +460,13 @@ int hal_ad9361_set_sample_rate(uint64_t rate_hz)
 
 int hal_ad9361_set_rx_bandwidth(uint64_t bw_hz)
 {
-    return sysfs_write_ll(AD9361_IIO_PATH "in_voltage_rf_bandwidth",
+    return sysfs_write_ll(ad9361_path("in_voltage_rf_bandwidth"),
                           (long long)bw_hz);
 }
 
 int hal_ad9361_set_tx_bandwidth(uint64_t bw_hz)
 {
-    return sysfs_write_ll(AD9361_IIO_PATH "out_voltage_rf_bandwidth",
+    return sysfs_write_ll(ad9361_path("out_voltage_rf_bandwidth"),
                           (long long)bw_hz);
 }
 
@@ -431,19 +476,19 @@ int hal_ad9361_set_rx_gain(double gain_db)
     /* Ensure manual gain mode — writing gain in AGC mode silently fails.
      * This is the #1 cause of OTA decode collapse after cold boot.
      * See docs/ad9361-gain-mode-gotcha.md */
-    int rc = sysfs_write_str(AD9361_IIO_PATH "in_voltage0_gain_control_mode",
+    int rc = sysfs_write_str(ad9361_path("in_voltage0_gain_control_mode"),
                              "manual");
     if (rc != 0) {
         fprintf(stderr, "hal: WARNING: could not set manual gain mode\n");
     }
     /* AD9361 sysfs expects integer or "N.000000 dB" — just write integer */
     snprintf(buf, sizeof(buf), "%d", (int)gain_db);
-    return sysfs_write_str(AD9361_IIO_PATH "in_voltage0_hardwaregain", buf);
+    return sysfs_write_str(ad9361_path("in_voltage0_hardwaregain"), buf);
 }
 
 double hal_ad9361_get_rx_gain(void)
 {
-    const char *path = AD9361_IIO_PATH "in_voltage0_hardwaregain";
+    const char *path = ad9361_path("in_voltage0_hardwaregain");
     FILE *f = fopen(path, "r");
     if (!f)
         return -999.0;
@@ -456,7 +501,7 @@ double hal_ad9361_get_rx_gain(void)
 
 int hal_ad9361_set_rx_gain_mode(const char *mode)
 {
-    return sysfs_write_str(AD9361_IIO_PATH "in_voltage0_gain_control_mode", mode);
+    return sysfs_write_str(ad9361_path("in_voltage0_gain_control_mode"), mode);
 }
 
 int hal_ad9361_set_tx_attenuation(double atten_db)
@@ -467,33 +512,33 @@ int hal_ad9361_set_tx_attenuation(double atten_db)
      * The attribute supports 0.25 dB steps, so use one decimal. */
     double val = -(atten_db > 0 ? atten_db : -atten_db);
     snprintf(buf, sizeof(buf), "%.1f", val);
-    return sysfs_write_str(AD9361_IIO_PATH "out_voltage0_hardwaregain", buf);
+    return sysfs_write_str(ad9361_path("out_voltage0_hardwaregain"), buf);
 }
 
 int hal_ad9361_run_calibration(void)
 {
     int rc = 0;
     /* TX quadrature calibration — corrects TX IQ imbalance */
-    rc |= sysfs_write_str(AD9361_IIO_PATH "calib_mode", "manual_tx_quad");
+    rc |= sysfs_write_str(ad9361_path("calib_mode"), "manual_tx_quad");
     usleep(100000);  /* 100 ms for calibration to complete */
 
     /* RF DC offset calibration — corrects LO leakage */
-    rc |= sysfs_write_str(AD9361_IIO_PATH "calib_mode", "rf_dc_offs");
+    rc |= sysfs_write_str(ad9361_path("calib_mode"), "rf_dc_offs");
     usleep(100000);
 
     /* Return to auto mode */
-    rc |= sysfs_write_str(AD9361_IIO_PATH "calib_mode", "auto");
+    rc |= sysfs_write_str(ad9361_path("calib_mode"), "auto");
     return rc;
 }
 
 int hal_ad9361_load_rx_fir(const char *config)
 {
-    return sysfs_write_str(AD9361_IIO_PATH "filter_fir_config", config);
+    return sysfs_write_str(ad9361_path("filter_fir_config"), config);
 }
 
 int hal_ad9361_set_rx_fir_en(int enable)
 {
-    return sysfs_write_ll(AD9361_IIO_PATH "in_voltage_filter_fir_en",
+    return sysfs_write_ll(ad9361_path("in_voltage_filter_fir_en"),
                           enable ? 1 : 0);
 }
 
@@ -507,15 +552,15 @@ int hal_ad9361_set_rx_fir_en(int enable)
 
 long long hal_ad9361_get_rx_lo(void)
 {
-    return sysfs_read_ll(AD9361_IIO_PATH "out_altvoltage0_RX_LO_frequency");
+    return sysfs_read_ll(ad9361_path("out_altvoltage0_RX_LO_frequency"));
 }
 
 long long hal_ad9361_get_rx_bandwidth(void)
 {
-    return sysfs_read_ll(AD9361_IIO_PATH "in_voltage_rf_bandwidth");
+    return sysfs_read_ll(ad9361_path("in_voltage_rf_bandwidth"));
 }
 
 long long hal_ad9361_get_sample_rate(void)
 {
-    return sysfs_read_ll(AD9361_IIO_PATH "in_voltage_sampling_frequency");
+    return sysfs_read_ll(ad9361_path("in_voltage_sampling_frequency"));
 }

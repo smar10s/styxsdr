@@ -130,6 +130,11 @@ volatile uint32_t *hal_ddr_tx_buf(void);
  * AD9361 configuration via sysfs
  * -------------------------------------------------------------------------- */
 
+/* Sysfs directory of the AD9361 IIO device, ending in '/'. The device is
+ * found by name, because IIO numbering depends on the bitstream and device
+ * tree. NULL if there is no such device. */
+const char *hal_ad9361_iio_dir(void);
+
 int hal_ad9361_set_rx_lo(uint64_t freq_hz);
 int hal_ad9361_set_tx_lo(uint64_t freq_hz);
 int hal_ad9361_set_sample_rate(uint64_t rate_hz);
