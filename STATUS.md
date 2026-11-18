@@ -39,13 +39,13 @@ Pluto had an antenna on instead of the loopback cable.
    - Done: build `0x77280121`, timing MET, WNS +0.290, 14,749 LUT (was
      15,591). A second placement strategy also meets timing.
    - Done: `session_end.sh` passes on cable loopback.
-   - Left: the OTA gate, which needs the antenna.
+   - Done: OTA gate 80/80 EAPOL. `merge_check.sh` passes.
 2. shesha (`trim/pl-header-peripherals`, pinned to `5739a64`):
    - Done: the test no longer hardcodes `iio:device1`.
    - Done: hardware suite 48/48 on Deimos, cable loopback.
-   - Left: the manual test, with the antenna.
-3. Push this branch, then Deimos and shesha. Merge to `main` once Deimos
-   is green, then repin Neso.
+   - Done: the manual test with the antenna (24 EAPOL vs 6 disassoc).
+3. Push this branch, then Deimos and shesha. Deimos is green, so this
+   can merge to `main`. Then repin Neso.
 
 # Known Issues
 
