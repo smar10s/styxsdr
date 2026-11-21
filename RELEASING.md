@@ -8,7 +8,11 @@
 
 ## Steps
 
-1. **Full build**
+1. **Bump the version**
+
+   Set `version` in `pyproject.toml` to the release version.
+
+2. **Full build**
 
    ```bash
    make all    # bitstream + firmware + package
@@ -22,7 +26,7 @@
    make package
    ```
 
-2. **Verify the artifact**
+3. **Verify the artifact**
 
    The output is `build/fpga/pluto.frm`.  Confirm the fingerprint:
 
@@ -31,16 +35,17 @@
    cat build/fpga/timing_status       # should be "met"
    ```
 
-3. **Tag and push**
+4. **Tag and push**
 
    ```bash
-   git tag v$(grep version pyproject.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
-   git push origin --tags
+   VERSION=$(grep version pyproject.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+   git tag -a "v$VERSION" -m "v$VERSION"
+   git push origin "v$VERSION"
    ```
 
-4. **Create GitHub Release**
+5. **Create GitHub Release**
 
-   - Title: `v0.1.0` (match the tag)
+   - Title: `vX.Y.Z` (match the tag)
    - Attach `build/fpga/pluto.frm`
    - Copy the release notes template below, filling in the fingerprint
 

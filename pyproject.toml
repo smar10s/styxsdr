@@ -1,6 +1,6 @@
 [project]
 name = "styx"
-version = "0.1.0"
+version = "0.3.0"
 description = "PlutoSDR infrastructure platform — DMA, DDR, IQ capture, HIL test injection"
 requires-python = ">=3.9"
 dependencies = [
