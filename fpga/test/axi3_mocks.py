@@ -13,8 +13,10 @@ IQ sample helpers:
         64-bit beat: {word_odd, word_even} (even at lower address)
 """
 
+from collections import deque
+
 import cocotb
-from cocotb.triggers import RisingEdge, Timer
+from cocotb.triggers import FallingEdge, RisingEdge, Timer
 import random
 
 
@@ -53,23 +55,48 @@ def unpack_iq_beat(beat):
 
 
 class Axi3WriteSlave:
-    """Mock AXI3 write slave that captures burst writes into a dict.
+    """Mock AXI3 write slave with independent AW/W/B channels.
 
     Args:
         dut: cocotb DUT handle.
         prefix: Signal name prefix (default "m_axi_").
         clk: Clock signal (default dut.clk).
         wready_delay: Cycles to delay WREADY after WVALID (simulates slow DDR).
+        bresp_delay: Cycles between a burst's last W beat and its B response.
+        max_outstanding: Cap on unresponded AWs. None means no mock-side cap,
+            so the DUT's own NUM_WRITE_OUTSTANDING limit is observable.
+
+    Attributes:
+        bursts: [(base_addr, [beat_data, ...]), ...] in W-completion order.
+        mem: byte-addressed write memory.
+        aw_accepted, w_completed, b_completed, inflight, max_inflight_seen:
+            transaction counters for assertions.
+        stall_wready: If True, never accept W beats (overflow testing).
+        stall_bresp: If True, hold B responses (write-pointer testing).
     """
 
-    def __init__(self, dut, prefix="m_axi_", clk=None, wready_delay=0):
+    def __init__(self, dut, prefix="m_axi_", clk=None, wready_delay=0,
+                 bresp_delay=0, max_outstanding=None):
         self.dut = dut
         self.clk = clk if clk is not None else dut.clk
         self._p = prefix
         self.mem = {}  # byte_addr -> byte value
-        self.bursts = []  # list of (base_addr, [beat_data, ...])
+        self.bursts = []  # list of (base_addr, [beat_data, ...]) on W completion
         self.wready_delay = wready_delay
+        self.bresp_delay = bresp_delay
+        self.max_outstanding = max_outstanding
         self.stall_wready = False  # if True, never assert WREADY
+        self.stall_bresp = False   # if True, hold B responses
+
+        self.aw_queue = deque()   # [base_addr, burst_len, [beat_data, ...]]
+        self.b_pending = deque()  # (due_cycle, base_addr)
+        self.aw_accepted = 0
+        self.w_completed = 0
+        self.b_completed = 0
+        self.inflight = 0
+        self.max_inflight_seen = 0
+        self.cycle = 0
+        self._bvalid_driven = False
 
     def _sig(self, name):
         return getattr(self.dut, self._p + name)
@@ -108,85 +135,123 @@ class Axi3WriteSlave:
             for b in range(8):
                 self.mem[addr + b] = (beat >> (8 * b)) & 0xFF
 
-    async def run(self):
-        """Main loop — run as cocotb.start_soon(slave.run())."""
-        self._sig("awready").value = 0
-        self._sig("wready").value = 0
-        self._sig("bresp").value = 0
-        self._sig("bvalid").value = 0
-        # BID if it exists
+    def _set(self, name, value):
         try:
-            self._sig("bid").value = 0
+            self._sig(name).value = value
         except AttributeError:
             pass
 
+    def _read(self, name):
+        try:
+            return int(self._sig(name).value)
+        except (AttributeError, ValueError):
+            return None
+
+    async def run(self):
+        """Main loop — start once with cocotb.start_soon(slave.run())."""
+        self._set("awready", 0)
+        self._set("wready", 0)
+        self._set("bresp", 0)
+        self._set("bvalid", 0)
+        self._set("bid", 0)
+
+        cocotb.start_soon(self._tick())
+        cocotb.start_soon(self._aw_channel())
+        cocotb.start_soon(self._w_channel())
+        cocotb.start_soon(self._b_channel())
+
+    async def _tick(self):
         while True:
-            # Wait for AWVALID
-            while True:
-                await RisingEdge(self.clk)
-                try:
-                    if int(self._sig("awvalid").value) == 1:
-                        break
-                except ValueError:
-                    pass  # X/Z during reset
-
-            # Capture address
-            base_addr = int(self._sig("awaddr").value)
-            awlen = int(self._sig("awlen").value)
-            burst_len = awlen + 1
-
-            # Accept AW
-            self._sig("awready").value = 1
             await RisingEdge(self.clk)
-            self._sig("awready").value = 0
+            self.cycle += 1
 
-            # Receive W beats
-            beat_data = []
-            for beat_idx in range(burst_len):
-                # Optional WREADY delay
-                if self.wready_delay > 0:
-                    for _ in range(self.wready_delay):
-                        await RisingEdge(self.clk)
+    async def _aw_channel(self):
+        while True:
+            await RisingEdge(self.clk)
+            if (self.max_outstanding is not None
+                    and self.inflight >= self.max_outstanding):
+                self._set("awready", 0)
+                continue
+            if self._read("awvalid") != 1:
+                self._set("awready", 0)
+                continue
 
-                if self.stall_wready:
-                    # Stall forever (for overflow testing)
-                    while self.stall_wready:
-                        await RisingEdge(self.clk)
+            base_addr = self._read("awaddr")
+            awlen = self._read("awlen")
+            burst_len = (awlen or 0) + 1
 
-                self._sig("wready").value = 1
+            self.aw_queue.append([base_addr, burst_len, []])
+            self.aw_accepted += 1
+            self.inflight += 1
+            self.max_inflight_seen = max(self.max_inflight_seen, self.inflight)
 
-                # Wait for WVALID
-                while True:
+            self._set("awready", 1)
+            await RisingEdge(self.clk)
+            self._set("awready", 0)
+
+    async def _w_channel(self):
+        while True:
+            if not self.aw_queue:
+                await RisingEdge(self.clk)
+                continue
+
+            base_addr, burst_len, beat_data = self.aw_queue[0]
+
+            while len(beat_data) < burst_len:
+                for _ in range(self.wready_delay):
                     await RisingEdge(self.clk)
-                    try:
-                        if int(self._sig("wvalid").value) == 1:
-                            break
-                    except ValueError:
-                        pass
 
-                data = int(self._sig("wdata").value)
+                while self.stall_wready:
+                    await RisingEdge(self.clk)
+
+                # Sample WDATA mid-cycle, when a combinational DUT output
+                # is settled, then accept it on the next rising edge.
+                await FallingEdge(self.clk)
+                while self._read("wvalid") != 1:
+                    await FallingEdge(self.clk)
+
+                data = self._read("wdata")
+                wlast = self._read("wlast")
+                beat_idx = len(beat_data)
+                if (beat_idx == burst_len - 1) != (wlast == 1):
+                    raise AssertionError(
+                        f"WLAST={wlast} on beat {beat_idx}/{burst_len - 1}")
+
+                self._set("wready", 1)
+                await RisingEdge(self.clk)
+                self._set("wready", 0)
+
                 beat_data.append(data)
-                self._sig("wready").value = 0
-
-                # Store in byte-addressed memory
                 beat_addr = base_addr + beat_idx * 8
                 for b in range(8):
                     self.mem[beat_addr + b] = (data >> (8 * b)) & 0xFF
 
-            # Send B response
+            self.aw_queue.popleft()
             self.bursts.append((base_addr, beat_data))
-            self._sig("bresp").value = 0  # OKAY
-            self._sig("bvalid").value = 1
+            self.w_completed += 1
+            self.b_pending.append((self.cycle + self.bresp_delay, base_addr))
 
-            # Wait for BREADY
-            while True:
-                await RisingEdge(self.clk)
-                try:
-                    if int(self._sig("bready").value) == 1:
-                        break
-                except ValueError:
-                    pass
-            self._sig("bvalid").value = 0
+    async def _b_channel(self):
+        while True:
+            await RisingEdge(self.clk)
+
+            if self._bvalid_driven:
+                if self.stall_bresp:
+                    continue
+                if self._read("bready") == 1:
+                    self._set("bvalid", 0)
+                    self._bvalid_driven = False
+                    self.b_pending.popleft()
+                    self.inflight -= 1
+                    self.b_completed += 1
+                continue
+
+            if (self.b_pending and not self.stall_bresp
+                    and self.cycle >= self.b_pending[0][0]):
+                self._set("bresp", 0)
+                self._set("bid", 0)
+                self._set("bvalid", 1)
+                self._bvalid_driven = True
 
 
 class Axi3ReadSlave:
@@ -344,6 +409,7 @@ class Axi3SharedSlave:
         self.rvalid_delay = rvalid_delay
         self.reads = []   # (base_addr, burst_len)
         self.writes = []  # (base_addr, [beat_data, ...])
+        self._tasks = []
 
     def _r_sig(self, name):
         return getattr(self.dut, self._rp + name)
@@ -416,8 +482,16 @@ class Axi3SharedSlave:
         self._w_sig("bresp").value = 0
         self._w_sig("bvalid").value = 0
 
-        cocotb.start_soon(self._read_channel())
-        cocotb.start_soon(self._write_channel())
+        self._tasks = [
+            cocotb.start_soon(self._read_channel()),
+            cocotb.start_soon(self._write_channel()),
+        ]
+
+    def stop(self):
+        """Stop background channel coroutines (for re-setup in one test)."""
+        for task in self._tasks:
+            task.kill()
+        self._tasks = []
 
     # ---- Read channel (TX DDR reads) ----
 
@@ -492,20 +566,23 @@ class Axi3SharedSlave:
 
             beat_data = []
             for beat_idx in range(burst_len):
-                self._w_sig("wready").value = 1
-
+                # Sample WDATA mid-cycle, then accept on the next rising
+                # edge.  The RX W data is a combinational output.
+                await FallingEdge(self.clk)
                 while True:
-                    await RisingEdge(self.clk)
                     try:
                         if int(self._w_sig("wvalid").value) == 1:
                             break
                     except ValueError:
                         pass
+                    await FallingEdge(self.clk)
 
                 data = int(self._w_sig("wdata").value)
-                beat_data.append(data)
+                self._w_sig("wready").value = 1
+                await RisingEdge(self.clk)
                 self._w_sig("wready").value = 0
 
+                beat_data.append(data)
                 beat_addr = base_addr + beat_idx * 8
                 for b in range(8):
                     self.mem[beat_addr + b] = (data >> (8 * b)) & 0xFF

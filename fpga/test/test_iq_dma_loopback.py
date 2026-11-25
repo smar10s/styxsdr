@@ -46,12 +46,27 @@ RX_DDR_BASE = 0x20000000
 SAMPLES_PER_BURST = 32
 VALID_RATIO = 5       # matches Verilog parameter -GVALID_RATIO
 
+# A single DUT is reused across credit levels, so the previous run's clock
+# and slave coroutines must be stopped before starting a new one.
+_prev_tasks = []
+_prev_slave = None
+
 
 async def setup(dut, max_outstanding=2):
     """Start clocks, reset, create drivers, return (axi_tx, axi_rx, slave)."""
+    global _prev_tasks, _prev_slave
+
+    for task in _prev_tasks:
+        task.kill()
+    _prev_tasks = []
+    if _prev_slave is not None:
+        _prev_slave.stop()
+        _prev_slave = None
+
     # Single clock for both domains (TX_CLK_SAME_AS_RX=1)
-    cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
-    cocotb.start_soon(Clock(dut.s_axi_tx_aclk, 10, unit="ns").start())
+    _prev_tasks.append(cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start()))
+    _prev_tasks.append(cocotb.start_soon(
+        Clock(dut.s_axi_tx_aclk, 10, unit="ns").start()))
 
     # Tie tx_clk to clk (unused in single-clock mode but still driven)
     dut.tx_clk.value = 0
@@ -95,6 +110,7 @@ async def setup(dut, max_outstanding=2):
                             write_prefix="m_axi_rx_", clk=dut.clk,
                             max_outstanding=max_outstanding)
     cocotb.start_soon(slave.run())
+    _prev_slave = slave
 
     return axi_tx, axi_rx, slave
 
@@ -115,6 +131,23 @@ async def rx_read_overflow(axi_rx):
     """Read RX overflow count from STATUS bits [31:16]."""
     status, _ = await axi_rx.read(RX_REG_STATUS)
     return (status >> 16) & 0xFFFF
+
+
+async def rx_read_wr_ptr(axi_rx):
+    """Read the B-confirmed DDR write pointer (samples that have landed)."""
+    val, _ = await axi_rx.read(RX_REG_WR_PTR)
+    return val
+
+
+async def wait_rx_landed(axi_rx, count, timeout=20000):
+    """Wait until at least count samples have landed in DDR."""
+    landed = await rx_read_wr_ptr(axi_rx)
+    for _ in range(timeout):
+        if landed >= count:
+            return landed
+        await RisingEdge(axi_rx.clk)
+        landed = await rx_read_wr_ptr(axi_rx)
+    return landed
 
 
 async def tx_oneshot_trigger(axi_tx, slave, samples, tx_count=None):
@@ -201,7 +234,11 @@ async def test_loopback_basic(dut):
     assert sc >= expected_captures, \
         f"RX sample_count {sc} < expected captures {expected_captures}"
 
-    rx_data = slave.read_iq_samples(RX_DDR_BASE, sc)
+    landed = await wait_rx_landed(axi_rx, expected_captures, timeout=2000)
+    assert landed >= expected_captures, \
+        f"Only {landed}/{expected_captures} samples landed in DDR"
+
+    rx_data = slave.read_iq_samples(RX_DDR_BASE, landed)
     mismatches = 0
     for i in range(expected_captures):
         tx_idx = i * VALID_RATIO
@@ -238,11 +275,9 @@ async def test_loopback_sustained(dut):
     await tx_cyclic_trigger(axi_tx, slave, samples, tx_count=wave_len)
 
     target = rx_captures(tx_produce)  # should be burst-aligned
-    for _ in range(20000):
-        await RisingEdge(dut.clk)
-        sc = await rx_read_sample_count(axi_rx)
-        if sc >= target:
-            break
+    landed = await wait_rx_landed(axi_rx, target, timeout=20000)
+    assert landed >= target, \
+        f"Only {landed}/{target} samples landed in DDR"
 
     sc = await rx_read_sample_count(axi_rx)
     assert sc >= target, \
@@ -251,9 +286,9 @@ async def test_loopback_sustained(dut):
     stopped = await tx_cyclic_stop(axi_tx)
     assert stopped, "Failed to stop cyclic TX"
 
-    rx_data = slave.read_iq_samples(RX_DDR_BASE, sc)
+    rx_data = slave.read_iq_samples(RX_DDR_BASE, landed)
     mismatches = 0
-    n_check = min(sc, target)
+    n_check = min(landed, target)
     for i in range(n_check):
         tx_idx = i * VALID_RATIO
         exp_re, exp_im = samples[tx_idx % wave_len]
@@ -296,17 +331,14 @@ async def test_loopback_cyclic_diagnostics(dut):
 
         await tx_cyclic_trigger(axi_tx, slave, samples, tx_count=wave_len)
 
-        for _ in range(30000):
-            await RisingEdge(dut.clk)
-            sc = await rx_read_sample_count(axi_rx)
-            if sc >= target:
-                break
-
+        landed = await wait_rx_landed(axi_rx, target, timeout=30000)
         overflow_end = await rx_read_overflow(axi_rx)
         sc_final = await rx_read_sample_count(axi_rx)
         overflow = overflow_end - overflow_start
 
-        rx_data = slave.read_iq_samples(RX_DDR_BASE, min(sc_final, target))
+        assert landed >= target, \
+            f"Only {landed}/{target} samples landed in DDR"
+        rx_data = slave.read_iq_samples(RX_DDR_BASE, min(landed, target))
         first_mismatch = -1
         mismatch_count = 0
         n_check = min(len(rx_data), target // VALID_RATIO)
@@ -317,6 +349,11 @@ async def test_loopback_cyclic_diagnostics(dut):
             if not iq_eq(got_re, got_im, exp_re, exp_im):
                 if first_mismatch < 0:
                     first_mismatch = i
+                if mismatch_count < 5:
+                    dut._log.error(
+                        f"RX[{i}]=TX[{tx_idx}] wave[{tx_idx % wave_len}]: "
+                        f"expected ({exp_re:03X},{exp_im:03X}), "
+                        f"got ({got_re:03X},{got_im:03X})")
                 mismatch_count += 1
 
         ok = (overflow == 0 and first_mismatch < 0)
@@ -371,8 +408,8 @@ async def test_loopback_boundary_trace(dut):
     for _ in range(500):
         await RisingEdge(dut.clk)
 
-    sc = await rx_read_sample_count(axi_rx)
-    rx_data = slave.read_iq_samples(RX_DDR_BASE, sc)
+    landed = await wait_rx_landed(axi_rx, n_target // VALID_RATIO, timeout=5000)
+    rx_data = slave.read_iq_samples(RX_DDR_BASE, landed)
 
     # Verify TX output is correct per-sample
     tx_bad = sum(1 for i in range(min(n_target, len(tx_log)))
@@ -382,9 +419,9 @@ async def test_loopback_boundary_trace(dut):
         f"TX output has {tx_bad} mismatches — drain FSM corruption"
 
     # Verify RX DDR matches decimated TX output
-    dut._log.info(f"--- RX data check (TX={len(tx_log)}, RX={sc}) ---")
+    dut._log.info(f"--- RX data check (TX={len(tx_log)}, RX={landed}) ---")
     rx_bad = 0
-    for i in range(min(sc, n_target // VALID_RATIO)):
+    for i in range(min(landed, n_target // VALID_RATIO)):
         tx_idx = i * VALID_RATIO
         got_re, got_im = rx_data[i]
         exp_re, exp_im = tx_log[tx_idx]
@@ -580,10 +617,14 @@ async def test_loopback_ddr_integrity(dut):
     sc = await rx_read_sample_count(axi_rx)
     assert sc >= expected_cap, f"RX only captured {sc}/{expected_cap} samples"
 
-    rx_data = slave.read_iq_samples(RX_DDR_BASE, sc)
+    landed = await wait_rx_landed(axi_rx, expected_cap, timeout=5000)
+    assert landed >= expected_cap, \
+        f"Only {landed}/{expected_cap} samples landed in DDR"
+
+    rx_data = slave.read_iq_samples(RX_DDR_BASE, landed)
     mismatches = 0
     n_expected = len(full) // VALID_RATIO + 1
-    for i in range(min(sc, n_expected)):
+    for i in range(min(landed, n_expected)):
         tx_idx = i * VALID_RATIO
         if tx_idx >= len(full):
             break
@@ -683,11 +724,11 @@ async def test_loopback_stream_wrap(dut):
 
     # Independent confirmation from the RX side: a frozen DAC repeats one
     # value forever, so a healthy stream must show many distinct captures.
-    sc = await rx_read_sample_count(axi_rx)
-    assert sc > 0, "RX captured nothing"
-    rx_data = slave.read_iq_samples(RX_DDR_BASE, sc)
+    landed = await wait_rx_landed(axi_rx, 64, timeout=10000)
+    assert landed > 0, "RX captured nothing"
+    rx_data = slave.read_iq_samples(RX_DDR_BASE, landed)
     distinct = len({(re & 0xFFF, im & 0xFFF) for re, im in rx_data})
-    dut._log.info(f"stream wrap: RX captured {sc}, {distinct} distinct values")
+    dut._log.info(f"stream wrap: RX captured {landed}, {distinct} distinct values")
     assert distinct > 8, (
-        f"RX saw only {distinct} distinct values in {sc} captures — "
+        f"RX saw only {distinct} distinct values in {landed} captures — "
         f"DAC output was frozen, not streaming")

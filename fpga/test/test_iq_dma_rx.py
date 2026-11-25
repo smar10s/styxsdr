@@ -11,9 +11,12 @@ Tests:
     7. No burst without DDR_BASE — no AXI3 activity without base configured
     8. DDR wrap boundary — verify wrap at correct address
     9. Slow WREADY — delayed WREADY doesn't cause overflow
-   10. Sample_cnt_out — verify per-sample port advances
-   11. Long burst data integrity — 1024+ samples, verify all DDR data
-   12. Burst with backpressure — frame-pattern writes with wready delay (KI#9 pattern)
+    10. Sample_cnt_out — verify per-sample port advances
+    11. Long burst data integrity — 1024+ samples, verify all DDR data
+    12. Burst with backpressure — frame-pattern writes with wready delay (KI#9 pattern)
+    13. Deep B latency — 200+ clock responses at 61.44 Msps, zero overflow, wrap integrity
+    14. wr_ptr ordering — never passes a burst whose B has not returned
+    15. Multiple in flight — several bursts outstanding at once, within the AXI cap
 """
 
 import cocotb
@@ -21,7 +24,7 @@ from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge, Timer
 
 from axi_lite_driver import AxiLiteMaster
-from axi3_mocks import Axi3WriteSlave, pack_iq_word, unpack_iq_beat
+from axi3_mocks import Axi3WriteSlave, pack_iq_word, pack_iq_beat, unpack_iq_beat
 
 # Register offsets
 REG_CONTROL      = 0x00
@@ -35,7 +38,7 @@ DDR_BASE_ADDR    = 0x10000000
 SAMPLES_PER_BURST = 32
 
 
-async def setup(dut, wready_delay=0):
+async def setup(dut, wready_delay=0, bresp_delay=0, max_outstanding=None):
     """Start clock, reset, create drivers, configure base, return (axi, slave)."""
     cocotb.start_soon(Clock(dut.clk, 10, unit="ns").start())
 
@@ -68,7 +71,9 @@ async def setup(dut, wready_delay=0):
 
     axi = AxiLiteMaster(dut, prefix="s_axi_", clk=dut.clk)
     slave = Axi3WriteSlave(dut, prefix="m_axi_", clk=dut.clk,
-                           wready_delay=wready_delay)
+                           wready_delay=wready_delay,
+                           bresp_delay=bresp_delay,
+                           max_outstanding=max_outstanding)
     cocotb.start_soon(slave.run())
 
     return axi, slave
@@ -95,6 +100,49 @@ async def feed_iq(dut, samples, gap=0):
         dut.valid_in.value = 0
         for _ in range(gap):
             await RisingEdge(dut.clk)
+
+
+async def feed_iq_rate(dut, samples, sample_rate_hz=61_440_000,
+                       clk_hz=100_000_000):
+    """Feed samples at a fractional clock cadence.
+
+    The default 61.44 Msps into a 100 MHz clock needs 1.6276 clocks per
+    sample, so an integer gap cannot express it.  The phase accumulator
+    emits 384 samples every 625 clocks, which is exact.
+    """
+    period = clk_hz / sample_rate_hz
+    phase = 0.0
+
+    for re, im in samples:
+        dut.valid_in.value = 1
+        dut.re_in.value = re & 0xFFF
+        dut.im_in.value = im & 0xFFF
+        await RisingEdge(dut.clk)
+        dut.valid_in.value = 0
+
+        phase += 1.0
+        while phase < period:
+            await RisingEdge(dut.clk)
+            phase += 1.0
+        phase -= period
+
+
+async def wait_for_bursts(slave, count, timeout=200_000):
+    """Wait for at least count W-completed bursts, return success flag."""
+    for _ in range(timeout):
+        await RisingEdge(slave.clk)
+        if len(slave.bursts) >= count:
+            return True
+    return False
+
+
+async def wait_for_b_acks(slave, count, timeout=200_000):
+    """Wait for at least count B responses, return success flag."""
+    for _ in range(timeout):
+        await RisingEdge(slave.clk)
+        if slave.b_completed >= count:
+            return True
+    return False
 
 
 async def wait_burst(slave, timeout=500):
@@ -205,25 +253,78 @@ async def test_enable_disable(dut):
 
 @cocotb.test()
 async def test_overflow_count(dut):
-    """Stall WREADY to cause overflow, verify overflow_count increments."""
+    """Stall WREADY, verify the exact drop count and clean recovery."""
     axi, slave = await setup(dut)
     await configure_and_enable(axi)
 
-    # Stall AXI writes — will cause overflow when both buffer halves are full
-    slave.stall_wready = True
+    ring = int(dut.RING_BURSTS.value)
+    buf_samples = int(dut.DDR_BUF_SAMPLES.value)
+    total = (ring + 2) * SAMPLES_PER_BURST
+    samples = [(i & 0x7FF, (i * 5) & 0x7FF) for i in range(total)]
 
-    # Feed many samples — should eventually overflow
-    samples = [(i & 0x7FF, i & 0x7FF) for i in range(SAMPLES_PER_BURST * 4)]
+    # Stall AXI writes — the ring fills and later samples are dropped.
+    slave.stall_wready = True
     await feed_iq(dut, samples)
 
-    # Wait a bit for overflow to register
-    for _ in range(100):
+    for _ in range(200):
         await RisingEdge(dut.clk)
 
-    # Read STATUS — overflow_count is bits [31:16]
     status, _ = await axi.read(REG_STATUS)
     overflow = (status >> 16) & 0xFFFF
-    assert overflow > 0, f"No overflow detected (STATUS=0x{status:08X})"
+    # A slot is reserved before the first sample of a burst, so the fill
+    # stage holds no partial burst when the ring fills.  Exactly ring*32
+    # samples are accepted; the remaining two bursts are dropped.
+    assert overflow == 2 * SAMPLES_PER_BURST, \
+        f"Overflow = {overflow}, expected {2 * SAMPLES_PER_BURST} " \
+        f"(ring={ring}, fed={total})"
+
+    # Release the stall.  The buffered bursts must drain intact, in order.
+    slave.stall_wready = False
+    assert await wait_for_bursts(slave, ring), \
+        f"Only {len(slave.bursts)}/{ring} buffered bursts completed"
+    assert await wait_for_b_acks(slave, ring), \
+        f"Only {slave.b_completed}/{ring} buffered bursts were acknowledged"
+
+    for b in range(ring):
+        addr, beats = slave.bursts[b]
+        expected_addr = DDR_BASE_ADDR + b * SAMPLES_PER_BURST * 4
+        assert addr == expected_addr, \
+            f"Burst {b} addr = 0x{addr:08X}, expected 0x{expected_addr:08X}"
+        for k in range(0, SAMPLES_PER_BURST, 2):
+            re0, im0 = samples[b * SAMPLES_PER_BURST + k]
+            re1, im1 = samples[b * SAMPLES_PER_BURST + k + 1]
+            expected = pack_iq_beat(re0, im0, re1, im1)
+            assert beats[k // 2] == expected, \
+                f"Burst {b} beat {k // 2} corrupted after recovery"
+
+    wr_ptr, _ = await axi.read(REG_WR_PTR)
+    assert wr_ptr == (ring * SAMPLES_PER_BURST) % buf_samples, \
+        f"WR_PTR after drain = {wr_ptr}, expected " \
+        f"{(ring * SAMPLES_PER_BURST) % buf_samples}"
+
+    # One more burst after recovery must land and advance wr_ptr by one
+    # burst.  This is the per-response ordering Deimos relies on.
+    recovery = [(0x123, 0x456)] * SAMPLES_PER_BURST
+    await feed_iq(dut, recovery)
+    assert await wait_for_bursts(slave, ring + 1), "Recovery burst never fired"
+    assert await wait_for_b_acks(slave, ring + 1), "Recovery burst never acked"
+
+    wr_ptr, _ = await axi.read(REG_WR_PTR)
+    assert wr_ptr == ((ring + 1) * SAMPLES_PER_BURST) % buf_samples, \
+        f"WR_PTR after recovery = {wr_ptr}, expected " \
+        f"{((ring + 1) * SAMPLES_PER_BURST) % buf_samples}"
+
+    addr, beats = slave.bursts[ring]
+    expected_addr = DDR_BASE_ADDR + ring * SAMPLES_PER_BURST * 4
+    assert addr == expected_addr, \
+        f"Recovery burst addr = 0x{addr:08X}, expected 0x{expected_addr:08X}"
+    expected_beat = pack_iq_beat(0x123, 0x456, 0x123, 0x456)
+    assert beats == [expected_beat] * (SAMPLES_PER_BURST // 2), \
+        "Recovery burst data corrupted"
+
+    status, _ = await axi.read(REG_STATUS)
+    assert ((status >> 16) & 0xFFFF) == overflow, \
+        "Recovery produced additional overflow"
 
 
 @cocotb.test()
@@ -444,3 +545,145 @@ async def test_burst_with_backpressure(dut):
 
     assert mismatches == 0, \
         f"{mismatches} sample mismatches with backpressure (KI#9 pattern)"
+
+
+@cocotb.test()
+async def test_deep_b_latency_6144msps_across_wrap(dut):
+    """200+ clock B latency at 61.44 Msps: no overflow, intact across wrap."""
+    axi, slave = await setup(dut, bresp_delay=240)
+    await configure_and_enable(axi)
+
+    buf_samples = int(dut.DDR_BUF_SAMPLES.value)
+    total = buf_samples + 8 * SAMPLES_PER_BURST
+    samples = [(i & 0xFFF, (i * 7) & 0xFFF) for i in range(total)]
+
+    await feed_iq_rate(dut, samples)
+
+    num_bursts = total // SAMPLES_PER_BURST
+    assert await wait_for_bursts(slave, num_bursts, timeout=400_000), \
+        f"Only {len(slave.bursts)}/{num_bursts} bursts completed"
+    assert await wait_for_b_acks(slave, num_bursts, timeout=400_000), \
+        f"Only {slave.b_completed}/{num_bursts} bursts acknowledged"
+
+    status, _ = await axi.read(REG_STATUS)
+    overflow = (status >> 16) & 0xFFFF
+    assert overflow == 0, f"Deep B latency overflowed {overflow} samples"
+
+    wr_ptr, _ = await axi.read(REG_WR_PTR)
+    assert wr_ptr == total % buf_samples, \
+        f"WR_PTR = {wr_ptr}, expected {total % buf_samples}"
+
+    # Verify the newest full ring in DDR after the wrap.  Every address in
+    # the ring was rewritten by the final pass through the buffer.
+    start = total - buf_samples
+    for i in range(start, total, 2):
+        addr = DDR_BASE_ADDR + (i % buf_samples) * 4
+        beat = slave.read_dword(addr)
+        re0, im0 = samples[i]
+        re1, im1 = samples[i + 1]
+        expected = pack_iq_beat(re0, im0, re1, im1)
+        assert beat == expected, \
+            f"Sample {i} corrupted at DDR offset {i % buf_samples}: " \
+            f"got 0x{beat:016X}, expected 0x{expected:016X}"
+
+
+@cocotb.test()
+async def test_wr_ptr_never_passes_unacked_burst(dut):
+    """Hold B responses; wr_ptr must not move until the bursts are confirmed."""
+    axi, slave = await setup(dut, bresp_delay=1000)
+    await configure_and_enable(axi)
+
+    num_bursts = 6
+    samples = [(i & 0x7FF, (i * 3) & 0x7FF)
+               for i in range(num_bursts * SAMPLES_PER_BURST)]
+
+    slave.stall_bresp = True
+    await feed_iq_rate(dut, samples)
+
+    assert await wait_for_bursts(slave, num_bursts, timeout=200_000), \
+        f"Only {len(slave.bursts)}/{num_bursts} bursts reached the bus"
+
+    for _ in range(50):
+        await RisingEdge(dut.clk)
+        assert int(dut.ddr_wr_ptr_out.value) == 0, \
+            "wr_ptr advanced before any B response returned"
+
+    assert slave.max_inflight_seen >= 4, \
+        f"Only {slave.max_inflight_seen} bursts in flight; expected several"
+
+    slave.stall_bresp = False
+    assert await wait_for_b_acks(slave, num_bursts, timeout=200_000), \
+        f"Only {slave.b_completed}/{num_bursts} bursts acknowledged"
+
+    buf_samples = int(dut.DDR_BUF_SAMPLES.value)
+    wr_ptr = int(dut.ddr_wr_ptr_out.value)
+    assert wr_ptr == (num_bursts * SAMPLES_PER_BURST) % buf_samples, \
+        f"WR_PTR after release = {wr_ptr}, expected " \
+        f"{(num_bursts * SAMPLES_PER_BURST) % buf_samples}"
+
+
+@cocotb.test()
+async def test_multiple_bursts_in_flight(dut):
+    """Several AWs are outstanding at once, within NUM_WRITE_OUTSTANDING."""
+    axi, slave = await setup(dut, bresp_delay=240)
+    await configure_and_enable(axi)
+
+    num_bursts = 12
+    samples = [(i & 0xFFF, (i * 11) & 0xFFF)
+               for i in range(num_bursts * SAMPLES_PER_BURST)]
+    await feed_iq_rate(dut, samples)
+
+    assert await wait_for_bursts(slave, 6, timeout=200_000), \
+        "Fewer than six bursts reached the bus"
+    assert slave.max_inflight_seen >= 4, \
+        f"Only {slave.max_inflight_seen} bursts in flight; expected several"
+
+    assert await wait_for_bursts(slave, num_bursts, timeout=200_000), \
+        f"Only {len(slave.bursts)}/{num_bursts} bursts completed"
+    assert await wait_for_b_acks(slave, num_bursts, timeout=200_000), \
+        f"Only {slave.b_completed}/{num_bursts} bursts acknowledged"
+
+    assert slave.max_inflight_seen <= 8, \
+        f"{slave.max_inflight_seen} AWs outstanding exceeds " \
+        "NUM_WRITE_OUTSTANDING=8"
+
+
+@cocotb.test()
+async def test_stall_tolerance_exact(dut):
+    """With B held, absorb 8 in flight + the ring, then drop exactly one burst."""
+    axi, slave = await setup(dut)
+    await configure_and_enable(axi)
+
+    ring = int(dut.RING_BURSTS.value)
+    max_in_flight = 8  # NUM_WRITE_OUTSTANDING in the AXI interface
+    absorb_bursts = ring + max_in_flight
+    samples = [(i & 0xFFF, (i * 13) & 0xFFF)
+               for i in range((absorb_bursts + 1) * SAMPLES_PER_BURST)]
+
+    slave.stall_bresp = True
+    await feed_iq(dut, samples[:absorb_bursts * SAMPLES_PER_BURST])
+
+    # Let AW/W saturate: eight bursts reach the bus, the rest fill the ring.
+    for _ in range(2000):
+        await RisingEdge(dut.clk)
+
+    status, _ = await axi.read(REG_STATUS)
+    overflow = (status >> 16) & 0xFFFF
+    assert overflow == 0, \
+        f"Overflow before the ring filled: {overflow} (ring={ring})"
+    assert slave.aw_accepted == max_in_flight, \
+        f"{slave.aw_accepted} AWs accepted, expected {max_in_flight}"
+    assert slave.max_inflight_seen == max_in_flight, \
+        f"{slave.max_inflight_seen} in flight, expected {max_in_flight}"
+    assert slave.w_completed == max_in_flight, \
+        f"{slave.w_completed} bursts sent, expected {max_in_flight}"
+
+    # No AW credit and no free ring slot: every sample of the next burst drops.
+    await feed_iq(dut, samples[absorb_bursts * SAMPLES_PER_BURST:])
+    for _ in range(500):
+        await RisingEdge(dut.clk)
+
+    status, _ = await axi.read(REG_STATUS)
+    overflow = (status >> 16) & 0xFFFF
+    assert overflow == SAMPLES_PER_BURST, \
+        f"Overflow = {overflow}, expected exactly {SAMPLES_PER_BURST}"

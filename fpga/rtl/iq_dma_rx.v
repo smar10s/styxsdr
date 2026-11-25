@@ -9,13 +9,15 @@
 //
 // IQ samples arrive from adc_sync at the configured ADC rate into a
 // 100 MHz fabric clock. Accumulate 32 samples (16 pairs) in a
-// BRAM-backed buffer, then burst-write to DDR as 16 × 64-bit beats.
+// BRAM-backed ring of bursts, then burst-write to DDR as 16 × 64-bit
+// beats.
 //
-// Double-buffered via a single 32×64-bit BRAM addressed as two halves
-// (buf_sel=0 → entries 0..15, buf_sel=1 → entries 16..31).  While
-// one half is being burst-written to DDR, the other accepts incoming
-// samples.  At the supported rates this never overflows; overflow is
-// counted for diagnostics if AXI stalls badly.
+// The ring holds RING_BURSTS bursts in one BRAM36.  The fill side
+// reserves the next free slot before accepting a burst, so the reader
+// can be many bursts behind.  AW and W are decoupled from B: up to
+// MAX_OUTSTANDING address writes may await responses while new bursts
+// keep streaming at one beat per clock.  wr_ptr advances only when a
+// response lands, so it still means "all data up to here is in DDR".
 //
 // Previous register-file implementation (buf0[0:31], buf1[0:31]) used
 // per-element write-enables that synthesised to ~41 unique control sets,
@@ -35,7 +37,8 @@
 
 module iq_dma_rx #(
     parameter DDR_BUF_SAMPLES = 33554432, // 128 MB / 4 bytes per sample
-    parameter BURST_LEN       = 16        // AXI3 max burst (16 beats of 64 bits)
+    parameter BURST_LEN       = 16,       // AXI3 max burst (16 beats of 64 bits)
+    parameter RING_BURSTS     = 16        // burst slots in the BRAM ring
 ) (
     (* X_INTERFACE_INFO = "xilinx.com:signal:clock:1.0 clk CLK" *)
     (* X_INTERFACE_PARAMETER = "ASSOCIATED_BUSIF m_axi:s_axi, ASSOCIATED_RESET rst" *)
@@ -70,7 +73,7 @@ module iq_dma_rx #(
 
     // --- AXI3 write-only master (to PS7 HP0, 64-bit) ---
     (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 m_axi AWADDR" *)
-    (* X_INTERFACE_PARAMETER = "PROTOCOL AXI3, FREQ_HZ 100000000, ADDR_WIDTH 32, DATA_WIDTH 64, HAS_BURST 1, HAS_LOCK 0, HAS_PROT 0, HAS_CACHE 0, HAS_QOS 0, HAS_REGION 0, HAS_WSTRB 1, MAX_BURST_LENGTH 16, NUM_WRITE_OUTSTANDING 2, NUM_READ_OUTSTANDING 0, SUPPORTS_NARROW_BURST 0, READ_WRITE_MODE WRITE_ONLY" *)
+    (* X_INTERFACE_PARAMETER = "PROTOCOL AXI3, FREQ_HZ 100000000, ADDR_WIDTH 32, DATA_WIDTH 64, HAS_BURST 1, HAS_LOCK 0, HAS_PROT 0, HAS_CACHE 0, HAS_QOS 0, HAS_REGION 0, HAS_WSTRB 1, MAX_BURST_LENGTH 16, NUM_WRITE_OUTSTANDING 8, NUM_READ_OUTSTANDING 0, SUPPORTS_NARROW_BURST 0, READ_WRITE_MODE WRITE_ONLY" *)
     output reg  [31:0] m_axi_awaddr,
     (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 m_axi AWLEN" *)
     output wire [3:0]  m_axi_awlen,     // BURST_LEN - 1 = 15
@@ -87,15 +90,15 @@ module iq_dma_rx #(
     output wire [5:0]  m_axi_awid,
 
     (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 m_axi WDATA" *)
-    output reg  [63:0] m_axi_wdata,
+    output wire [63:0] m_axi_wdata,
     (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 m_axi WSTRB" *)
     output wire [7:0]  m_axi_wstrb,     // 8'hFF
     (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 m_axi WID" *)
     output wire [5:0]  m_axi_wid,
     (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 m_axi WLAST" *)
-    output reg         m_axi_wlast,
+    output wire        m_axi_wlast,
     (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 m_axi WVALID" *)
-    output reg         m_axi_wvalid,
+    output wire        m_axi_wvalid,
     (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 m_axi WREADY" *)
     input  wire        m_axi_wready,
 
@@ -104,7 +107,7 @@ module iq_dma_rx #(
     (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 m_axi BVALID" *)
     input  wire        m_axi_bvalid,
     (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 m_axi BREADY" *)
-    output reg         m_axi_bready,
+    output wire        m_axi_bready,
 
     (* X_INTERFACE_INFO = "xilinx.com:interface:aximm:1.0 m_axi BID" *)
     input  wire [5:0]  m_axi_bid,
@@ -163,8 +166,21 @@ module iq_dma_rx #(
     // Derived parameters
     // =========================================================
     localparam SAMPLES_PER_BURST = BURST_LEN * 2;   // 32 samples per burst
+    localparam SLOT_W            = $clog2(RING_BURSTS);
+    localparam BEAT_W            = (BURST_LEN <= 1) ? 1 : $clog2(BURST_LEN);
+    localparam MEM_AW            = $clog2(RING_BURSTS * BURST_LEN);
+    localparam BURST_CNT_W       = SLOT_W + 1;
+    localparam MAX_OUTSTANDING   = 8;
+    localparam AW_LEAD           = 2;
 
-    // Verify DDR buffer is a whole number of bursts (wrap alignment)
+    localparam [BURST_CNT_W-1:0] RING_FULL = RING_BURSTS[BURST_CNT_W-1:0];
+    localparam [BURST_CNT_W-1:0] MAX_OUT_V = MAX_OUTSTANDING[BURST_CNT_W-1:0];
+    localparam [BURST_CNT_W-1:0] AW_LEAD_V = AW_LEAD[BURST_CNT_W-1:0];
+
+    function [31:0] extend32(input [BEAT_W-1:0] value);
+        extend32 = {{(32-BEAT_W){1'b0}}, value};
+    endfunction
+
     initial begin
         if (DDR_BUF_SAMPLES % SAMPLES_PER_BURST != 0) begin
             $error("DDR_BUF_SAMPLES (%0d) must be a multiple of SAMPLES_PER_BURST (%0d)",
@@ -176,11 +192,37 @@ module iq_dma_rx #(
             $error("BURST_LEN (%0d) must be 1..16 (AXI3 limit, 4-bit awlen)",
                    BURST_LEN);
         end
+        // The next burst's first read uses the beat counter's low bits, and
+        // the slot address multiplies by BURST_LEN under a fixed address
+        // width.  Both assume a power of two.
+        if ((BURST_LEN & (BURST_LEN - 1)) != 0) begin
+            $error("BURST_LEN (%0d) must be a power of two", BURST_LEN);
+        end
         // The write pointer is 25 bits wide and is zero-extended when it
         // forms the DDR byte address.
         if (DDR_BUF_SAMPLES > (1 << 25)) begin
             $error("DDR_BUF_SAMPLES (%0d) must not exceed 2**25 (wr_ptr_r width)",
                    DDR_BUF_SAMPLES);
+        end
+        // Slot selection uses a bit slice, so the ring size must be a power
+        // of two.  Eight is the smallest size that can hold the AXI3
+        // outstanding-write depth.
+        if (RING_BURSTS < MAX_OUTSTANDING || RING_BURSTS > 32) begin
+            $error("RING_BURSTS (%0d) must be %0d..32",
+                   RING_BURSTS, MAX_OUTSTANDING);
+        end
+        if ((RING_BURSTS & (RING_BURSTS - 1)) != 0) begin
+            $error("RING_BURSTS (%0d) must be a power of two", RING_BURSTS);
+        end
+        if (RING_BURSTS * BURST_LEN > 512) begin
+            $error("RING_BURSTS * BURST_LEN (%0d) must fit one 512x64 BRAM36",
+                   RING_BURSTS * BURST_LEN);
+        end
+        // If the DDR buffer were smaller than the ring, an address pass
+        // could lap an unacknowledged burst.
+        if (DDR_BUF_SAMPLES < RING_BURSTS * SAMPLES_PER_BURST) begin
+            $error("DDR_BUF_SAMPLES (%0d) must hold at least one full ring (%0d)",
+                   DDR_BUF_SAMPLES, RING_BURSTS * SAMPLES_PER_BURST);
         end
     end
 
@@ -210,77 +252,63 @@ module iq_dma_rx #(
     assign sample_cnt_out = reg_sample_count[24:0];
 
     // =========================================================
-    // Double-buffered burst buffer — inferred dual-port BRAM
+    // Burst ring — one BRAM36, RING_BURSTS × BURST_LEN × 64 bits
     //
-    // 32 × 64-bit entries: buf_sel=0 fills entries [0..15],
-    // buf_sel=1 fills entries [16..31].  Burst reads from the
-    // opposite half.  Each 64-bit entry holds a packed pair:
-    //   {8'b0, im_odd, re_odd, 8'b0, im_even, re_even}
-    //
-    // This replaces 2 × 32 × 24-bit register files that each
-    // needed a unique write-enable, consuming ~41 control sets.
-    // BRAM uses zero additional control sets.
+    // The fill side writes the slot selected by produced_bursts; the
+    // read side drains the slot selected by sent_bursts.  A slot is
+    // reused only after its last W beat has been accepted, so response
+    // latency does not block new bursts.
     // =========================================================
     (* ram_style = "block" *)
-    reg [63:0] burst_mem [0:2*BURST_LEN-1];
+    reg [63:0] burst_mem [0:RING_BURSTS*BURST_LEN-1];
 
-    reg        buf_sel;       // 0 = filling low half, 1 = filling high half
-    reg [5:0]  fill_count;    // 0..32 samples (6 bits for value 32)
-    reg [23:0] pending_even;  // latched even sample waiting for its odd pair
-    reg        has_even;      // 1 = pending_even is valid
-    reg [3:0]  pair_count;    // 0..15, index within current half
+    // Fill-side BRAM write port
+    reg              mem_wr_en;
+    reg [MEM_AW-1:0] mem_wr_addr;
+    reg [63:0]       mem_wr_data;
 
-    // BRAM write port (fill side)
-    reg        mem_wr_en;
-    reg [4:0]  mem_wr_addr;   // {buf_sel, pair_count[3:0]}
-    reg [63:0] mem_wr_data;
+    // Read-side BRAM read port (1-cycle latency)
+    reg [MEM_AW-1:0] mem_rd_addr;
+    reg [63:0]       mem_rd_data;
 
-    // BRAM read port (burst side) — 1-cycle latency
-    reg [4:0]  mem_rd_addr;
-    reg [63:0] mem_rd_data;
-
-    // Port A: synchronous write
     always @(posedge clk) begin
         if (mem_wr_en)
             burst_mem[mem_wr_addr] <= mem_wr_data;
     end
 
-    // Port B: synchronous read (1-cycle latency)
     always @(posedge clk) begin
         mem_rd_data <= burst_mem[mem_rd_addr];
     end
 
     // =========================================================
-    // DMA FSM states
+    // Burst counters — produced → AW → W → B, all in order
     // =========================================================
-    localparam S_IDLE  = 3'd0;  // waiting for a full buffer
-    localparam S_ADDR  = 3'd1;  // AW phase
-    localparam S_PIPE  = 3'd2;  // 1-cycle pipeline wait for first beat
-    localparam S_WRITE = 3'd3;  // W beat: wdata valid, waiting for wready
-    localparam S_NEXT  = 3'd4;  // 1-cycle gap: load next beat from BRAM
-    localparam S_RESP  = 3'd5;  // B response
+    reg [BURST_CNT_W-1:0] produced_bursts;  // fill side, advances on burst completion
+    reg [BURST_CNT_W-1:0] aw_bursts;        // AW side, advances on AW handshake
+    reg [BURST_CNT_W-1:0] sent_bursts;      // W side, advances on last W beat
+    reg [BURST_CNT_W-1:0] acked_bursts;     // B side, advances on B handshake
 
-    reg [2:0]  state;
-    reg [3:0]  beat_cnt;      // 0..15 within burst
-    reg        burst_sel;     // which half the burst is reading from
-    reg [24:0] burst_wr_ptr;  // wr_ptr snapshot for this burst
-    reg        burst_pending; // a filled buffer is waiting for burst
-
-    reg [3:0]  rd_beat;       // next beat index to read from BRAM
+    wire [BURST_CNT_W-1:0] ring_occupancy = produced_bursts - sent_bursts;
+    wire [BURST_CNT_W-1:0] aw_pending     = produced_bursts - aw_bursts;
+    wire [BURST_CNT_W-1:0] aw_outstanding = aw_bursts - acked_bursts;
 
     // =========================================================
-    // Fill logic — runs independently, always accepts samples
-    //
-    // Accumulates even/odd pairs and writes packed 64-bit words
-    // to BRAM.  fill_count tracks individual samples (0..32),
-    // pair_count tracks 64-bit words written (0..15).
+    // Fill logic — reserves a ring slot, then accepts 32 samples
     // =========================================================
+    reg [5:0]        fill_count;    // 0..SAMPLES_PER_BURST
+    reg [BEAT_W-1:0] pair_count;    // 0..BURST_LEN-1
+    reg              has_even;
+    reg [23:0]       pending_even;
+    reg [24:0]       aw_sample_ptr; // DDR sample index for the next AW
+
+    wire [31:0] fill_word_addr32 = produced_bursts * BURST_LEN
+                                   + extend32(pair_count);
+
     always @(posedge clk) begin
         if (rst) begin
             fill_count       <= 0;
             pair_count       <= 0;
-            buf_sel          <= 0;
-            burst_pending    <= 0;
+            produced_bursts  <= 0;
             has_even         <= 0;
             pending_even     <= 0;
             reg_sample_count <= 0;
@@ -290,26 +318,26 @@ module iq_dma_rx #(
             mem_wr_addr      <= 0;
             mem_wr_data      <= 0;
         end else begin
-            mem_wr_en <= 0;  // default: no write
-
-            // Clear burst_pending when burst FSM picks it up
-            if (burst_pending_clear)
-                burst_pending <= 0;
+            mem_wr_en <= 0;
 
             if (reg_enable && valid_in && base_configured) begin
-                if (fill_count < SAMPLES_PER_BURST) begin
-                    // Normal fill into current buffer half
+                if (fill_count == 0 && ring_occupancy >= RING_FULL) begin
+                    // Every slot is filled and no W burst has completed.
+                    // A burst reserves its slot before its first sample,
+                    // so this is the only place samples can be dropped.
+                    overflow_count <= overflow_count + 1;
+                end else if (fill_count < SAMPLES_PER_BURST[5:0]) begin
                     if (!has_even) begin
-                        // First sample of pair (even) — latch it
+                        // First sample of a pair — latch it.
                         pending_even <= {im_in, re_in};
                         has_even     <= 1;
                     end else begin
-                        // Second sample of pair (odd) — write packed word
+                        // Second sample — write the packed 64-bit word.
                         mem_wr_en   <= 1;
-                        mem_wr_addr <= {buf_sel, pair_count};
+                        mem_wr_addr <= fill_word_addr32[MEM_AW-1:0];
                         mem_wr_data <= {
-                            {8'b0, im_in, re_in},            // odd: high 32
-                            {8'b0, pending_even}              // even: low 32
+                            {8'b0, im_in, re_in},       // odd: high 32 bits
+                            {8'b0, pending_even}        // even: low 32 bits
                         };
                         has_even    <= 0;
                         pair_count  <= pair_count + 1;
@@ -320,178 +348,169 @@ module iq_dma_rx #(
                     if (reg_sample_count == 32'hFFFFFFFF)
                         reg_wrap_count <= reg_wrap_count + 1;
 
-                    // Buffer just became full? (fill_count is pre-increment value)
-                    if (fill_count == SAMPLES_PER_BURST - 1) begin
-                        if (!burst_pending) begin
-                            // Other half is free — swap and continue
-                            burst_pending <= 1;
-                            buf_sel       <= ~buf_sel;
-                            fill_count    <= 0;
-                            pair_count    <= 0;
-                            has_even      <= 0;
-                        end else begin
-                            // Other half still being burst-written.
-                            // Stuck — subsequent samples overflow.
-                            // fill_count stays at 32.
-                        end
+                    if (fill_count == SAMPLES_PER_BURST[5:0] - 6'd1) begin
+                        // Last sample of the burst.  The final pair write
+                        // was issued above; release the slot to the reader.
+                        produced_bursts <= produced_bursts + 1;
+                        fill_count      <= 0;
+                        pair_count      <= 0;
+                        has_even        <= 0;
                     end
                 end else begin
-                    // fill_count == SAMPLES_PER_BURST and couldn't swap.
-                    // Check if burst_pending was cleared (burst started).
-                    if (!burst_pending) begin
-                        // Safe to swap now.  Accept this sample.
-                        burst_pending <= 1;
-                        buf_sel       <= ~buf_sel;
-                        fill_count    <= 1;
-                        pair_count    <= 0;
-                        has_even      <= 1;
-                        pending_even  <= {im_in, re_in};
-                        reg_sample_count <= reg_sample_count + 1;
-                        if (reg_sample_count == 32'hFFFFFFFF)
-                            reg_wrap_count <= reg_wrap_count + 1;
-                    end else begin
-                        // True overflow — both halves occupied
-                        overflow_count <= overflow_count + 1;
-                    end
+                    // Defensive: fill_count is never above SAMPLES_PER_BURST.
+                    overflow_count <= overflow_count + 1;
                 end
             end
         end
     end
 
     // =========================================================
-    // Burst FSM — reads packed words from the non-fill BRAM half
-    //
-    // BRAM has 1-cycle read latency.  To guarantee correct data
-    // regardless of wready timing, the FSM inserts a 1-cycle gap
-    // (S_NEXT) between each AXI W beat to allow the BRAM read to
-    // settle.  This trades throughput (2 clocks/beat instead of 1)
-    // for correctness.  A 32-sample burst takes 32 clocks.  Samples
-    // arrive at 100 MHz divided by the ADC rate, so at 61.44 MSPS
-    // a burst has 52 sample clocks — 1.6× margin.  Lower rates have
-    // proportionally more margin.
-    //
-    // Schedule:
-    //   S_IDLE  → addr = beat 0
-    //   S_ADDR  → AW handshake; addr = beat 1
-    //   S_PIPE  → wdata = mem_rd_data (beat 0); wvalid = 1
-    //             addr = beat 2  → S_WRITE
-    //   S_WRITE → wait for wready.  On handshake, if last beat
-    //             → S_RESP.  Else → S_NEXT.
-    //   S_NEXT  → wdata = mem_rd_data (next beat); wvalid = 1
-    //             addr = beat N+2  → S_WRITE
-    //   S_RESP  → wait for bresp, advance wr_ptr → S_IDLE
+    // AW engine — issue addresses ahead of responses, in order
     // =========================================================
-    reg burst_pending_clear;
+    // aw_sample_ptr tracks the DDR position of the next AW.  It advances
+    // on AW, not on B, so several bursts can be addressed at once.  wr_ptr
+    // remains the B-driven "landed" pointer.
+    always @(posedge clk) begin
+        if (rst) begin
+            aw_bursts     <= 0;
+            aw_sample_ptr <= 0;
+            m_axi_awaddr  <= 0;
+            m_axi_awvalid <= 0;
+        end else begin
+            if (!m_axi_awvalid) begin
+                // Do not run addresses more than a burst or two ahead of
+                // the W stream.  An interconnect can hold a write credit
+                // from AW until the data arrives, so racing far ahead
+                // steals grants from other masters on a shared port.
+                if (aw_pending != 0 && aw_outstanding < MAX_OUT_V
+                        && ((aw_bursts - sent_bursts) < AW_LEAD_V)) begin
+                    m_axi_awaddr  <= reg_ddr_base + {5'b0, aw_sample_ptr, 2'b00};
+                    m_axi_awvalid <= 1;
+                end
+            end else if (m_axi_awready) begin
+                m_axi_awvalid <= 0;
+                aw_bursts     <= aw_bursts + 1;
+                if ({7'b0, aw_sample_ptr} + SAMPLES_PER_BURST >= DDR_BUF_SAMPLES)
+                    aw_sample_ptr <= 0;
+                else
+                    aw_sample_ptr <= aw_sample_ptr + SAMPLES_PER_BURST[24:0];
+            end
+        end
+    end
+
+    // =========================================================
+    // W engine — 1 beat/clock with a prefetch skid
+    //
+    // The BRAM output register needs one cycle after the address, so a
+    // beat passes through two pipeline stages before it reaches the
+    // skid.  The skid is four entries deep and credits (in_system)
+    // throttle reads, which keeps 1 beat/clock without the old gap
+    // state and absorbs any WREADY stall.
+    // =========================================================
+    reg              w_busy;
+    reg [BEAT_W:0]   rd_beat;     // next beat to issue (0..BURST_LEN)
+    reg [BEAT_W-1:0] out_beat;    // next beat on the bus
+    reg              rd_issued;   // address in flight; data arrives next cycle
+    reg              rd_push;     // mem_rd_data is valid and ready to push
+
+    reg [2:0]  fifo_count;
+    reg [1:0]  fifo_rd_ptr;
+    reg [1:0]  fifo_wr_ptr;
+    reg [63:0] fifo_mem [0:3];
+
+    wire [31:0] read_word_addr32 = sent_bursts * BURST_LEN
+                                   + extend32(rd_beat[BEAT_W-1:0]);
+    wire        fifo_empty = (fifo_count == 0);
+    wire        w_pop = w_busy && !fifo_empty && m_axi_wready;
+    wire        w_push = rd_push;
+    wire [2:0]  fifo_count_next = fifo_count
+                                + (w_push ? 3'd1 : 3'd0)
+                                - (w_pop ? 3'd1 : 3'd0);
+    wire [2:0]  in_system = fifo_count
+                          + (rd_push ? 3'd1 : 3'd0)
+                          + (rd_issued ? 3'd1 : 3'd0);
+    wire        can_issue = w_busy
+                          && (rd_beat < BURST_LEN)
+                          && ((in_system - (w_pop ? 3'd1 : 3'd0)) < 3'd4);
+
+    assign m_axi_wdata  = fifo_mem[fifo_rd_ptr];
+    assign m_axi_wvalid = w_busy && !fifo_empty;
+    assign m_axi_wlast  = w_busy && !fifo_empty && (out_beat == BURST_LAST);
 
     always @(posedge clk) begin
         if (rst) begin
-            state            <= S_IDLE;
-            beat_cnt         <= 0;
-            rd_beat          <= 0;
-            wr_ptr_r         <= 0;
-            burst_wr_ptr     <= 0;
-            burst_sel        <= 0;
-            m_axi_awaddr     <= 0;
-            m_axi_awvalid    <= 0;
-            m_axi_wdata      <= 0;
-            m_axi_wvalid     <= 0;
-            m_axi_wlast      <= 0;
-            m_axi_bready     <= 0;
-            burst_pending_clear <= 0;
-            mem_rd_addr      <= 0;
+            w_busy      <= 0;
+            rd_beat     <= 0;
+            out_beat    <= 0;
+            rd_issued   <= 0;
+            rd_push     <= 0;
+            fifo_count  <= 0;
+            fifo_rd_ptr <= 0;
+            fifo_wr_ptr <= 0;
+            sent_bursts <= 0;
+            mem_rd_addr <= 0;
         end else begin
-            burst_pending_clear <= 0;
+            // Push the beat whose read completed last cycle.
+            if (rd_push) begin
+                fifo_mem[fifo_wr_ptr] <= mem_rd_data;
+                fifo_wr_ptr <= fifo_wr_ptr + 2'd1;
+            end
 
-            case (state)
-                // -------------------------------------------------
-                S_IDLE: begin
-                    if (burst_pending && base_configured) begin
-                        burst_sel     <= ~buf_sel;
-                        burst_wr_ptr  <= wr_ptr_r;
-                        m_axi_awaddr  <= reg_ddr_base + {5'b0, wr_ptr_r, 2'b00};
-                        m_axi_awvalid <= 1;
-                        beat_cnt      <= 0;
-                        // Start BRAM read for beat 0
-                        mem_rd_addr   <= {~buf_sel, 4'd0};
-                        rd_beat       <= 1;
-                        burst_pending_clear <= 1;
-                        state         <= S_ADDR;
-                    end
+            // Pop the head when the bus accepts it.
+            if (w_pop) begin
+                fifo_rd_ptr <= fifo_rd_ptr + 2'd1;
+                out_beat    <= out_beat + 1;
+            end
+
+            fifo_count <= fifo_count_next;
+            rd_push    <= rd_issued;
+
+            if (!w_busy) begin
+                if (sent_bursts != aw_bursts) begin
+                    // A filled burst has an accepted address; stream it.
+                    w_busy      <= 1;
+                    rd_beat     <= 1;
+                    out_beat    <= 0;
+                    mem_rd_addr <= read_word_addr32[MEM_AW-1:0];
+                    rd_issued   <= 1;
+                end else begin
+                    rd_issued <= 0;
                 end
+            end else if (can_issue) begin
+                mem_rd_addr <= read_word_addr32[MEM_AW-1:0];
+                rd_beat     <= rd_beat + 1;
+                rd_issued   <= 1;
+            end else begin
+                rd_issued <= 0;
+            end
 
-                // -------------------------------------------------
-                S_ADDR: begin
-                    if (m_axi_awready && m_axi_awvalid) begin
-                        m_axi_awvalid <= 0;
-                        // Beat 0 addr was set in S_IDLE (≥1 cycle ago).
-                        // Start read for beat 1; by S_PIPE, mem_rd_data
-                        // will have beat 0 (1 cycle after S_IDLE's addr).
-                        mem_rd_addr <= {burst_sel, rd_beat[3:0]};
-                        rd_beat     <= rd_beat + 1;
-                        state       <= S_PIPE;
-                    end
-                end
+            // Last beat of this burst was accepted.
+            if (w_pop && (out_beat == BURST_LAST)) begin
+                w_busy      <= 0;
+                sent_bursts <= sent_bursts + 1;
+            end
+        end
+    end
 
-                // -------------------------------------------------
-                S_PIPE: begin
-                    // mem_rd_data has beat 0 (addr set in S_IDLE,
-                    // ≥2 cycles ago).  Load it into wdata directly.
-                    m_axi_wdata  <= mem_rd_data;
-                    m_axi_wvalid <= 1;
-                    m_axi_wlast  <= (BURST_LEN == 1) ? 1'b1 : 1'b0;
-                    // Don't advance addr — beat 1's addr (from S_ADDR)
-                    // needs 1 more cycle to produce data.
-                    state        <= S_WRITE;
-                end
+    // =========================================================
+    // B engine — advance wr_ptr one burst per response, in order
+    // =========================================================
+    assign m_axi_bready = (aw_bursts != acked_bursts);
 
-                // -------------------------------------------------
-                S_WRITE: begin
-                    if (m_axi_wready && m_axi_wvalid) begin
-                        beat_cnt <= beat_cnt + 1;
-                        m_axi_wvalid <= 0;  // deassert until S_NEXT loads next beat
+    wire dma_active = w_busy || (produced_bursts != acked_bursts);
 
-                        if (beat_cnt == BURST_LAST) begin
-                            // Last beat accepted
-                            m_axi_wlast  <= 0;
-                            m_axi_bready <= 1;
-                            state        <= S_RESP;
-                        end else begin
-                            // Next beat's data is in mem_rd_data
-                            // (addr was set 2 cycles ago: in S_PIPE or
-                            // previous S_NEXT).  Go to S_NEXT to load it.
-                            state <= S_NEXT;
-                        end
-                    end
-                end
-
-                // -------------------------------------------------
-                S_NEXT: begin
-                    // mem_rd_data has the next beat: its addr was
-                    // set ≥2 cycles ago (in S_ADDR for beat 1, or
-                    // in the previous S_NEXT for subsequent beats).
-                    m_axi_wdata  <= mem_rd_data;
-                    m_axi_wvalid <= 1;
-                    m_axi_wlast  <= (beat_cnt == BURST_LAST) ? 1'b1 : 1'b0;
-                    // Start read for the beat after next
-                    mem_rd_addr  <= {burst_sel, rd_beat[3:0]};
-                    rd_beat      <= rd_beat + 1;
-                    state        <= S_WRITE;
-                end
-
-                // -------------------------------------------------
-                S_RESP: begin
-                    if (m_axi_bvalid && m_axi_bready) begin
-                        m_axi_bready <= 0;
-                        if ({7'b0, wr_ptr_r} + SAMPLES_PER_BURST >= DDR_BUF_SAMPLES)
-                            wr_ptr_r <= 0;
-                        else
-                            wr_ptr_r <= wr_ptr_r + SAMPLES_PER_BURST;
-                        state <= S_IDLE;
-                    end
-                end
-
-                default: state <= S_IDLE;
-            endcase
+    always @(posedge clk) begin
+        if (rst) begin
+            acked_bursts <= 0;
+            wr_ptr_r     <= 0;
+        end else begin
+            if (m_axi_bvalid && m_axi_bready) begin
+                acked_bursts <= acked_bursts + 1;
+                if ({7'b0, wr_ptr_r} + SAMPLES_PER_BURST >= DDR_BUF_SAMPLES)
+                    wr_ptr_r <= 0;
+                else
+                    wr_ptr_r <= wr_ptr_r + SAMPLES_PER_BURST[24:0];
+            end
         end
     end
 
@@ -588,7 +607,7 @@ module iq_dma_rx #(
             if (ar_done && !s_axi_rvalid) begin
                 case (ar_addr[7:0])
                     REG_CONTROL[7:0]:      s_axi_rdata <= {31'b0, reg_enable};
-                    REG_STATUS[7:0]:       s_axi_rdata <= {overflow_count, 15'b0, (state != S_IDLE)};
+                    REG_STATUS[7:0]:       s_axi_rdata <= {overflow_count, 15'b0, dma_active};
                     REG_DDR_BASE[7:0]:     s_axi_rdata <= reg_ddr_base;
                     REG_WR_PTR[7:0]:       s_axi_rdata <= {7'b0, wr_ptr_r};
                     REG_SAMPLE_COUNT[7:0]: s_axi_rdata <= reg_sample_count;

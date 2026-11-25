@@ -76,7 +76,7 @@ This checks AD9361 initialization and verifies the build fingerprint.
 
 | Module | Purpose |
 |---|---|
-| **iq_dma_rx** | ADC-to-DDR via AXI3 HP0. 128 MB circular buffer, double-buffered BRAM fill. |
+| **iq_dma_rx** | ADC-to-DDR via AXI3 HP0. 128 MB circular buffer, 16-burst BRAM ring fill. |
 | **iq_dma_tx** | DDR-to-DAC via AXI3 HP2. 16-segment fill pipeline, zero-bubble drain, stream mode with WR_PTR CDC. |
 | **hil_ctrl** | Test mux and DDR playback. Output is paced by the post-CDC ADC valid strobe. |
 | **snap_axi** | Debug capture probe. 1024-deep BRAM, pre/post trigger split, AXI4-Lite read-back. |

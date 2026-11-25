@@ -31,11 +31,12 @@ EXTRA_ARGS += --trace --trace-underscore
 endif
 endif
 
-# Parameter overrides for small-buffer sim (faster convergence)
+# Parameter overrides for sim.  The DDR buffer is one full ring plus a
+# margin so the wrap tests can overflow the ring without re-aliasing.
 ifeq ($(SIM),verilator)
-IQ_DMA_RX_OVERRIDE := EXTRA_ARGS="$(EXTRA_ARGS) -GDDR_BUF_SAMPLES=64"
+IQ_DMA_RX_OVERRIDE := EXTRA_ARGS="$(EXTRA_ARGS) -GDDR_BUF_SAMPLES=1024 -GRING_BURSTS=16"
 else
-IQ_DMA_RX_OVERRIDE := COMPILE_ARGS="-Piq_dma_rx.DDR_BUF_SAMPLES=64"
+IQ_DMA_RX_OVERRIDE := COMPILE_ARGS="-Piq_dma_rx.DDR_BUF_SAMPLES=1024 -Piq_dma_rx.RING_BURSTS=16"
 endif
 
 .PHONY: all_tests
