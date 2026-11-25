@@ -211,12 +211,18 @@ class Axi3WriteSlave:
                     await FallingEdge(self.clk)
 
                 data = self._read("wdata")
+                wlast = self._read("wlast")
+                beat_idx = len(beat_data)
+                if (beat_idx == burst_len - 1) != (wlast == 1):
+                    raise AssertionError(
+                        f"WLAST={wlast} on beat {beat_idx}/{burst_len - 1}")
+
                 self._set("wready", 1)
                 await RisingEdge(self.clk)
                 self._set("wready", 0)
 
                 beat_data.append(data)
-                beat_addr = base_addr + (len(beat_data) - 1) * 8
+                beat_addr = base_addr + beat_idx * 8
                 for b in range(8):
                     self.mem[beat_addr + b] = (data >> (8 * b)) & 0xFF
 
