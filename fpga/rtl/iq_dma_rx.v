@@ -303,7 +303,6 @@ module iq_dma_rx #(
             fill_count       <= 0;
             pair_count       <= 0;
             produced_bursts  <= 0;
-            aw_sample_ptr    <= 0;
             has_even         <= 0;
             pending_even     <= 0;
             reg_sample_count <= 0;
