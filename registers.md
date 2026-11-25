@@ -45,11 +45,12 @@ accumulator (256x64) → AXI3 HP0 burst writes.
 | 0x10   | SAMPLE_COUNT       | RO     | Total samples written, 32-bit wrapping                |
 | 0x14   | WRAP_COUNT         | RO     | Ring buffer wrap counter, 16-bit                      |
 
-Enable initiates streaming; disable stops after the current burst
-completes. `WR_PTR` is live — each read returns the instant value.
-Overflow occurs if the AXI write channel stalls beyond one buffer
-half-fill (nominally impossible at the 5:1 clock ratio but counted
-for diagnostics).
+Enable initiates streaming. Clearing enable stops accepting samples at
+once; bursts already buffered still drain to DDR. `WR_PTR` is live — each
+read returns the instant value, and it advances only when a DDR write is
+acknowledged, so everything below it has landed. Overflow is counted only
+when all sixteen ring slots are full and the writer is still waiting on AXI
+responses; treat it as a deep-stall diagnostic.
 
 ## iq_dma_tx (0x7C4D0000)
 
