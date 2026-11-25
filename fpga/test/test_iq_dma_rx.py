@@ -646,3 +646,44 @@ async def test_multiple_bursts_in_flight(dut):
     assert slave.max_inflight_seen <= 8, \
         f"{slave.max_inflight_seen} AWs outstanding exceeds " \
         "NUM_WRITE_OUTSTANDING=8"
+
+
+@cocotb.test()
+async def test_stall_tolerance_exact(dut):
+    """With B held, absorb 8 in flight + the ring, then drop exactly one burst."""
+    axi, slave = await setup(dut)
+    await configure_and_enable(axi)
+
+    ring = int(dut.RING_BURSTS.value)
+    max_in_flight = 8  # NUM_WRITE_OUTSTANDING in the AXI interface
+    absorb_bursts = ring + max_in_flight
+    samples = [(i & 0xFFF, (i * 13) & 0xFFF)
+               for i in range((absorb_bursts + 1) * SAMPLES_PER_BURST)]
+
+    slave.stall_bresp = True
+    await feed_iq(dut, samples[:absorb_bursts * SAMPLES_PER_BURST])
+
+    # Let AW/W saturate: eight bursts reach the bus, the rest fill the ring.
+    for _ in range(2000):
+        await RisingEdge(dut.clk)
+
+    status, _ = await axi.read(REG_STATUS)
+    overflow = (status >> 16) & 0xFFFF
+    assert overflow == 0, \
+        f"Overflow before the ring filled: {overflow} (ring={ring})"
+    assert slave.aw_accepted == max_in_flight, \
+        f"{slave.aw_accepted} AWs accepted, expected {max_in_flight}"
+    assert slave.max_inflight_seen == max_in_flight, \
+        f"{slave.max_inflight_seen} in flight, expected {max_in_flight}"
+    assert slave.w_completed == max_in_flight, \
+        f"{slave.w_completed} bursts sent, expected {max_in_flight}"
+
+    # No AW credit and no free ring slot: every sample of the next burst drops.
+    await feed_iq(dut, samples[absorb_bursts * SAMPLES_PER_BURST:])
+    for _ in range(500):
+        await RisingEdge(dut.clk)
+
+    status, _ = await axi.read(REG_STATUS)
+    overflow = (status >> 16) & 0xFFFF
+    assert overflow == SAMPLES_PER_BURST, \
+        f"Overflow = {overflow}, expected exactly {SAMPLES_PER_BURST}"

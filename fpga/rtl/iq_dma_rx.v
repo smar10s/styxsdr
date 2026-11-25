@@ -192,6 +192,12 @@ module iq_dma_rx #(
             $error("BURST_LEN (%0d) must be 1..16 (AXI3 limit, 4-bit awlen)",
                    BURST_LEN);
         end
+        // The next burst's first read uses the beat counter's low bits, and
+        // the slot address multiplies by BURST_LEN under a fixed address
+        // width.  Both assume a power of two.
+        if ((BURST_LEN & (BURST_LEN - 1)) != 0) begin
+            $error("BURST_LEN (%0d) must be a power of two", BURST_LEN);
+        end
         // The write pointer is 25 bits wide and is zero-extended when it
         // forms the DDR byte address.
         if (DDR_BUF_SAMPLES > (1 << 25)) begin

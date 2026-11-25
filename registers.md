@@ -33,8 +33,8 @@ AXI3 burst length: 16 beats = 128 bytes = 32 IQ samples per burst.
 
 ## iq_dma_rx (0x7C4B0000)
 
-Continuous ADC-to-DDR writer. 128 MB circular buffer, double-buffered BRAM
-accumulator (32x64) → AXI3 HP0 burst writes.
+Continuous ADC-to-DDR writer. 128 MB circular buffer, 16-burst BRAM ring
+accumulator (256x64) → AXI3 HP0 burst writes.
 
 | Offset | Name               | Access | Description                                          |
 |--------|--------------------|--------|------------------------------------------------------|

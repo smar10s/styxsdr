@@ -79,6 +79,11 @@ proc styx::parse_args {argv} {
 proc styx::create_project {adi_hdl_dir project_dir} {
     set ad_hdl_dir $adi_hdl_dir
 
+    # A register assigned in two always blocks is a real RTL bug.  Vivado
+    # otherwise resolves it silently, so make both synth warnings fatal.
+    set_msg_config -id {Synth 8-6859} -new_severity ERROR
+    set_msg_config -id {Synth 8-6858} -new_severity ERROR
+
     # ADI scripts must run in global scope (they set variables used by
     # procs like adi_ip_create that access them without global decl).
     set ::IGNORE_VERSION_CHECK 1
